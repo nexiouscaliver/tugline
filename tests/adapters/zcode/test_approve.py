@@ -113,6 +113,7 @@ def test_deny_decision_returned(config_on, tmp_path, approvals):
 
 def test_ask_decision_returned(config_on, tmp_path, approvals):
     write_decision(approvals, "n-ask", "ask")
+    fake = FakeTime()
     result = approve.run(
         "s-1",
         config=config_on,
@@ -120,8 +121,8 @@ def test_ask_decision_returned(config_on, tmp_path, approvals):
         approvals_root=approvals,
         wait=30,
         nonce="n-ask",
-        sleep=FakeTime().sleep,
-        clock=FakeTime().clock,
+        sleep=fake.sleep,
+        clock=fake.clock,
     )
     assert result == "ask"
 
@@ -249,6 +250,7 @@ def test_garbage_decision_file_ignored_until_timeout(
 
 def test_unknown_decision_value_ignored(config_on, tmp_path, approvals):
     write_decision(approvals, "n-maybe", "maybe")
+    fake = FakeTime()
     result = approve.run(
         "s-1",
         config=config_on,
@@ -256,14 +258,15 @@ def test_unknown_decision_value_ignored(config_on, tmp_path, approvals):
         approvals_root=approvals,
         wait=0.1,
         nonce="n-maybe",
-        sleep=FakeTime().sleep,
-        clock=FakeTime().clock,
+        sleep=fake.sleep,
+        clock=fake.clock,
     )
     assert result is None
 
 
 def test_decision_value_case_normalized(config_on, tmp_path, approvals):
     write_decision(approvals, "n-cap", "ALLOW")
+    fake = FakeTime()
     result = approve.run(
         "s-1",
         config=config_on,
@@ -271,8 +274,8 @@ def test_decision_value_case_normalized(config_on, tmp_path, approvals):
         approvals_root=approvals,
         wait=5,
         nonce="n-cap",
-        sleep=FakeTime().sleep,
-        clock=FakeTime().clock,
+        sleep=fake.sleep,
+        clock=fake.clock,
     )
     assert result == "allow"
 
