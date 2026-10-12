@@ -60,7 +60,9 @@ class Daemon:
         self.replies_path = os.path.expanduser(
             replies_path or DEFAULT_REPLIES_PATH
         )
-        self.state_root = state_root or policy.DEFAULT_STATE_ROOT
+        self.state_root = os.path.expanduser(
+            state_root or policy.DEFAULT_STATE_ROOT
+        )
         self.publisher = publisher or Publisher.from_config(config)
         self.sleep = sleep
         self.poll_timeout = poll_timeout

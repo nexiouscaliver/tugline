@@ -41,7 +41,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Mapping
 
-DEFAULT_STATE_ROOT = os.path.join(os.path.expanduser("~"), ".tugline", "state")
+DEFAULT_STATE_ROOT = os.path.join("~", ".tugline", "state")
 
 _SAFE_ID = re.compile(r"^[A-Za-z0-9._-]+$")
 
@@ -103,7 +103,7 @@ def decide(event: Mapping, session_state: SessionState) -> Decision:
 
 
 def _root(state_root: str | None) -> str:
-    return state_root or DEFAULT_STATE_ROOT
+    return os.path.expanduser(state_root or DEFAULT_STATE_ROOT)
 
 
 def _check_id(session_id: str) -> str:
