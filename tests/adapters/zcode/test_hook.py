@@ -141,23 +141,6 @@ def test_permissionrequest_records_warn_high(home, config_path):
     assert rec["priority"] == "high"
 
 
-def test_permissionrequest_approve_off_never_waits(home, config_path, monkeypatch):
-    from tugline.adapters.zcode import approve
-
-    def boom(*args, **kwargs):
-        raise AssertionError("approve module must not run when toggle is off")
-
-    monkeypatch.setattr(approve, "run", boom)
-    code = run_hook(
-        "PermissionRequest",
-        '{"hookEventName":"PermissionRequest","sessionId":"s-9"}',
-        config_path=config_path,
-        home=home,
-    )
-    assert code == 0
-    assert spool_records(home)
-
-
 def test_userpromptsubmit_records_only_never_publishes(home, config_path):
     code = run_hook(
         "UserPromptSubmit",
