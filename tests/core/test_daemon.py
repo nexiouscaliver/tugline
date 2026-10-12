@@ -193,3 +193,168 @@ def test_sigterm_handler_requests_stop(fake_ntfy, tmp_path):
         assert daemon._stop is True
     finally:
         signal_mod.signal(signal_mod.SIGTERM, signal_mod.SIG_DFL)
+
+
+# -- retry and backoff --
+
+
+def test_retry_until_success(fake_ntfy, tmp_path):
+    fake_ntfy.fail_posts = 2
+    daemon = make_daemon(fake_ntfy, tmp_path)
+    root = str(tmp_path / "spool")
+    spool_notify(root, "flaky")
+
+    assert daemon.flush() == 1
+    assert len(fake_ntfy.posts()) == 3
+    assert list(undelivered(root)) == []
+
+
+def test_retry_exhaustion_leaves_record_undelivered(fake_ntfy, tmp_path):
+    fake_ntfy.fail_posts = 99
+    daemon = make_daemon(fake_ntfy, tmp_path)
+    root = str(tmp_path / "spool")
+    rec = spool_notify(root, "down")
+
+    assert daemon.flush() == 0
+    assert len(fake_ntfy.posts()) == 5
+    pending = [r["id"] for r in undelivered(root)]
+    assert pending == [rec["id"]]
+
+
+def test_flush_pauses_after_three_failing_records(fake_ntfy, tmp_path):
+    fake_ntfy.fail_posts = 99
+    daemon = make_daemon(fake_ntfy, tmp_path)
+    root = str(tmp_path / "spool")
+    for i in range(5):
+        spool_notify(root, "r%d" % i)
+
+    daemon.flush()
+
+    assert len(fake_ntfy.posts()) == 15
+    assert len(list(undelivered(root))) == 5
+
+
+def test_failed_records_are_retried_next_cycle(fake_ntfy, tmp_path):
+    daemon = make_daemon(fake_ntfy, tmp_path)
+    root = str(tmp_path / "spool")
+    rec = spool_notify(root, "later")
+    fake_ntfy.fail_posts = 5
+    daemon.flush()
+    fake_ntfy.fail_posts = 0
+
+    assert daemon.flush() == 1
+    assert list(undelivered(root)) == []
+
+
+# -- policy integration through the daemon --
+
+
+def test_permission_request_publishes_to_warn_topic(fake_ntfy, tmp_path):
+    daemon = make_daemon(fake_ntfy, tmp_path)
+    spool_notify(
+        str(tmp_path / "spool"), "may I?", event="PermissionRequest", topic="tug-warn"
+    )
+
+    daemon.flush()
+
+    posts = fake_ntfy.posts()
+    assert len(posts) == 1
+    assert posts[0]["path"] == "/tug-warn"
+    assert posts[0]["headers"].get("x-priority") == "high"
+    assert "warning" in posts[0]["headers"].get("x-tags", "")
+
+
+def test_stop_publishes_when_session_armed_and_clears_marker(fake_ntfy, tmp_path):
+    from tugline.core import policy as policy_mod
+
+    daemon = make_daemon(fake_ntfy, tmp_path)
+    state_root = str(tmp_path / "state")
+    policy_mod.arm("s1", state_root=state_root)
+    spool_notify(str(tmp_path / "spool"), "done waiting", event="Stop")
+
+    daemon.flush()
+
+    assert len(fake_ntfy.posts()) == 1
+    assert not policy_mod.is_armed("s1", state_root=state_root)
+
+
+def test_short_stop_unarmed_stays_silent(fake_ntfy, tmp_path):
+    daemon = make_daemon(fake_ntfy, tmp_path)
+    root = str(tmp_path / "spool")
+    spool_notify(root, "p", event="UserPromptSubmit")
+    spool_notify(root, "s", event="Stop")
+
+    assert daemon.flush() == 2
+    assert fake_ntfy.posts() == []
+
+
+def test_long_stop_publishes_from_session_state(fake_ntfy, tmp_path):
+    from datetime import datetime, timedelta, timezone
+
+    daemon = make_daemon(fake_ntfy, tmp_path)
+    root = str(tmp_path / "spool")
+    start = datetime(2026, 10, 13, 10, 0, 0, tzinfo=timezone.utc)
+    append(
+        root,
+        event="UserPromptSubmit",
+        session_id="s1",
+        topic="tug",
+        priority="default",
+        title="p",
+        body="",
+        now=start,
+    )
+    append(
+        root,
+        event="Stop",
+        session_id="s1",
+        topic="tug",
+        priority="default",
+        title="s",
+        body="",
+        now=start + timedelta(seconds=700),
+    )
+
+    assert daemon.flush() == 2
+    assert len(fake_ntfy.posts()) == 1
+
+
+def test_notify_toggle_off_marks_records_without_publishing(fake_ntfy, tmp_path):
+    daemon = make_daemon(fake_ntfy, tmp_path)
+    daemon.config.toggles.notify = False
+    root = str(tmp_path / "spool")
+    spool_notify(root, "quiet")
+
+    assert daemon.flush() == 1
+    assert fake_ntfy.posts() == []
+    assert list(undelivered(root)) == []
+
+
+# -- resilience --
+
+
+def test_corrupt_spool_line_is_logged_and_skipped(fake_ntfy, tmp_path, monkeypatch):
+    daemon = make_daemon(fake_ntfy, tmp_path)
+    root = tmp_path / "spool"
+    spool_notify(str(root), "good")
+    day_file = next(root.glob("*.jsonl"))
+    day_file.write_text(day_file.read_text() + "{broken line\n")
+    lines = []
+    monkeypatch.setattr(daemon, "_log_fn", lines.append)
+
+    assert daemon.flush() == 1
+    assert len(fake_ntfy.posts()) == 1
+    assert any(line.endswith(":2") and "jsonl" in line for line in lines)
+
+
+def test_record_without_id_is_skipped_not_fatal(fake_ntfy, tmp_path, monkeypatch):
+    daemon = make_daemon(fake_ntfy, tmp_path)
+    root = tmp_path / "spool"
+    spool_notify(str(root), "good")
+    day_file = next(root.glob("*.jsonl"))
+    day_file.write_text(day_file.read_text() + '{"event": "notify"}\n')
+    lines = []
+    monkeypatch.setattr(daemon, "_log_fn", lines.append)
+
+    assert daemon.flush() == 1
+    assert any("without id" in line for line in lines)
