@@ -1,1 +1,18 @@
-# placeholder: the full packaging definition lands on loop/tugline-repo-bootstrap
+[project]
+name = "tugline"
+version = "0.0.1"
+description = "Push notifications and phone replies for coding-agent sessions, over ntfy"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.scripts]
+tug = "tugline.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[dependency-groups]
+dev = ["pytest"]
