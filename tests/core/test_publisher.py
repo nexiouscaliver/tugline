@@ -124,3 +124,21 @@ def test_empty_token_file_means_anonymous(fake_ntfy, tmp_path):
 def test_result_object_is_plain_data():
     r = PublishResult(ok=True, status=200, message_id="m1", error=None)
     assert r.ok and r.status == 200
+
+
+def test_token_file_with_key_value_lines(fake_ntfy, tmp_path):
+    path = tmp_path / "credentials"
+    path.write_text("ntfy_user=shahil\nntfy_token=tk_abcd1234\n")
+    pub = make_publisher(fake_ntfy, str(path))
+    pub.publish("tug", "x")
+    header = fake_ntfy.posts("/tug")[0]["headers"].get("authorization")
+    assert header == "Bearer tk_abcd1234"
+
+
+def test_token_file_bare_line_still_works(fake_ntfy, tmp_path):
+    path = tmp_path / "credentials"
+    path.write_text("tk_plain999\n")
+    pub = make_publisher(fake_ntfy, str(path))
+    pub.publish("tug", "x")
+    header = fake_ntfy.posts("/tug")[0]["headers"].get("authorization")
+    assert header == "Bearer tk_plain999"

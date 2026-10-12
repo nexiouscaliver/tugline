@@ -44,17 +44,31 @@ class Publisher:
         return cls(config.server.url, config.server.token_file, timeout)
 
     def read_token(self):
+        """Read the bearer token from the token file.
+
+        Accepts either a bare token on the first non-empty line or
+        key=value lines; the ntfy_token (or token) key wins. Never
+        raises and never logs the value.
+        """
         if not self.token_file:
             return None
         try:
             with open(os.path.expanduser(self.token_file), encoding="utf-8") as fh:
-                for line in fh:
-                    token = line.strip()
-                    if token:
-                        return token
+                lines = fh.read().splitlines()
         except OSError:
             return None
-        return None
+        fallback = None
+        for line in lines:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if "=" in line:
+                key, _, value = line.partition("=")
+                if key.strip().lower() in ("ntfy_token", "token") and value.strip():
+                    return value.strip()
+            elif fallback is None:
+                fallback = line
+        return fallback
 
     def publish(
         self,
