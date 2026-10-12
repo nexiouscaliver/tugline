@@ -1,5 +1,7 @@
 """Tests for config loading (tugline.core.config)."""
 
+import sys
+
 import pytest
 
 from tugline.core import config as cfg
@@ -187,6 +189,26 @@ def test_mini_parser_reads_the_default_template(home):
     assert parsed["toggles"]["approve"] is False
 
 
+def test_mini_parser_matches_pinned_structure_on_custom():
+    pinned = {
+        "server": {
+            "url": "http://10.0.0.5:2586",
+            "token_file": "~/.tugline/my-creds",
+        },
+        "topics": {
+            "main": "custom-main",
+            "warn": "custom-warn",
+            "reply": "custom-reply",
+        },
+        "policy": {"idle_seconds": 45},
+        "toggles": {"notify": False, "replies": False, "approve": True},
+    }
+    assert cfg._mini_toml_loads(CUSTOM) == pinned
+
+
+@pytest.mark.skipif(
+    sys.version_info < (3, 11), reason="tomllib only ships in the stdlib from 3.11"
+)
 def test_mini_parser_matches_tomllib_on_custom(home):
     import tomllib
 
