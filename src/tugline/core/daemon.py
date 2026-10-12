@@ -27,7 +27,9 @@ import signal
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
+import uuid
 from datetime import datetime, timezone
 
 from tugline.core import policy, spool, topics
@@ -95,6 +97,8 @@ class Daemon:
         return handled
 
     def _handle(self, record) -> bool:
+        if not record.get("id"):
+            raise ValueError("record without id")
         name = _record_event(record)
         session_id = str(record.get("session_id") or "")
         ts_epoch = _record_epoch(record)
@@ -159,6 +163,128 @@ class Daemon:
 
     def _mark(self, record):
         spool.mark_delivered(self.spool_root, record.get("id"))
+
+    # -- reply polling --
+
+    def poll_replies(self) -> int:
+        """Long-poll the reply topic once, capture new messages."""
+        if not self.config.toggles.replies:
+            return 0
+        base = self.config.server.url.rstrip("/")
+        topic = topics.resolve(topics.REPLY, self.config)
+        since = self._load_cursor()
+        url = "%s/%s/json?poll=1&since=%s" % (
+            base,
+            urllib.parse.quote(topic),
+            urllib.parse.quote(str(since)),
+        )
+        headers = {}
+        token = self.publisher.read_token()
+        if token:
+            headers["Authorization"] = "Bearer " + token
+        request = urllib.request.Request(url, headers=headers, method="GET")
+        try:
+            with urllib.request.urlopen(request, timeout=self.poll_timeout) as resp:
+                body = resp.read()
+        except urllib.error.HTTPError as exc:
+            self.log("reply poll failed: HTTP %d" % exc.code)
+            return 0
+        except (urllib.error.URLError, OSError) as exc:
+            self.log("reply poll failed: %s" % (getattr(exc, "reason", exc),))
+            return 0
+
+        count = 0
+        last_id = None
+        for line in body.decode("utf-8", "replace").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                message = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(message, dict):
+                continue
+            if message.get("event") not in (None, "message"):
+                continue
+            self._append_reply(message, topic)
+            count += 1
+            if message.get("id"):
+                last_id = str(message["id"])
+        if last_id:
+            self._save_cursor(last_id)
+        return count
+
+    def _append_reply(self, message, topic):
+        entry = {
+            "id": str(message.get("id") or uuid.uuid4().hex[:16]),
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "topic": message.get("topic") or topic,
+            "title": message.get("title") or "",
+            "body": message.get("message") or "",
+            "consumed": False,
+        }
+        directory = os.path.dirname(self.replies_path)
+        if directory:
+            os.makedirs(directory, exist_ok=True)
+        with open(self.replies_path, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(entry, separators=(",", ":")) + "\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+
+    def _cursor_path(self):
+        return os.path.join(self.state_root, "reply_cursor.json")
+
+    def _load_cursor(self):
+        try:
+            with open(self._cursor_path(), encoding="utf-8") as fh:
+                data = json.load(fh)
+            return data["last_id"]
+        except (OSError, ValueError, KeyError, TypeError):
+            return str(int(time.time()))
+
+    def _save_cursor(self, last_id):
+        os.makedirs(self.state_root, exist_ok=True)
+        path = self._cursor_path()
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump({"last_id": str(last_id)}, fh)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+
+    # -- cycle and serve loop --
+
+    def run_once(self):
+        """One daemon cycle: flush the spool, then poll replies."""
+        return {"handled": self.flush(), "replies": self.poll_replies()}
+
+    def serve(self):
+        """Run cycles until SIGTERM (or a stop request) lands."""
+        self._install_signal_handlers()
+        self.log("daemon started")
+        try:
+            while not self._stop:
+                self.run_once()
+                if self.cycle_idle and not self._stop:
+                    self.sleep(self.cycle_idle)
+        except KeyboardInterrupt:
+            pass
+        self.log("daemon stopped")
+
+    def request_stop(self):
+        self._stop = True
+
+    def _install_signal_handlers(self):
+        try:
+            signal.signal(signal.SIGTERM, self._on_sigterm)
+        except ValueError:
+            # Not the main thread (embedded use); stopping goes through
+            # request_stop() instead.
+            pass
+
+    def _on_sigterm(self, signum, frame):
+        self._stop = True
 
 
 def _record_event(record) -> str:

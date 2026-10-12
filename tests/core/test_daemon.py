@@ -75,3 +75,121 @@ def test_flush_marks_prompt_records_without_publishing(fake_ntfy, tmp_path):
     assert delivered == 1
     assert fake_ntfy.posts() == []
     assert list(undelivered(root)) == []
+
+
+# -- reply polling --
+
+
+def read_replies(tmp_path):
+    path = tmp_path / "replies.jsonl"
+    if not path.exists():
+        return []
+    import json as _json
+
+    return [_json.loads(line) for line in path.read_text().splitlines() if line]
+
+
+def test_poll_captures_reply_messages(fake_ntfy, tmp_path):
+    fake_ntfy.queue_reply("looks good, ship it", title="re", msg_id="r7")
+    daemon = make_daemon(fake_ntfy, tmp_path)
+
+    count = daemon.poll_replies()
+
+    assert count == 1
+    entries = read_replies(tmp_path)
+    assert len(entries) == 1
+    assert entries[0]["id"] == "r7"
+    assert entries[0]["body"] == "looks good, ship it"
+    assert entries[0]["title"] == "re"
+    assert entries[0]["consumed"] is False
+
+
+def test_poll_captures_multiple_replies_in_order(fake_ntfy, tmp_path):
+    for i in range(3):
+        fake_ntfy.queue_reply("reply %d" % i, msg_id="r%d" % i)
+    daemon = make_daemon(fake_ntfy, tmp_path)
+
+    assert daemon.poll_replies() == 3
+    assert [e["id"] for e in read_replies(tmp_path)] == ["r0", "r1", "r2"]
+
+
+def test_poll_sends_since_cursor_from_previous_run(fake_ntfy, tmp_path):
+    fake_ntfy.queue_reply("one", msg_id="r1")
+    daemon = make_daemon(fake_ntfy, tmp_path)
+    daemon.poll_replies()
+    fake_ntfy.queue_reply("two", msg_id="r2")
+    daemon.poll_replies()
+
+    paths = [r["path"] for r in fake_ntfy.gets()]
+    assert paths[0].startswith("/tug-reply/json?poll=1&since=")
+    assert "since=r1" in paths[1]
+
+
+def test_poll_with_no_messages_appends_nothing(fake_ntfy, tmp_path):
+    daemon = make_daemon(fake_ntfy, tmp_path)
+    assert daemon.poll_replies() == 0
+    assert read_replies(tmp_path) == []
+
+
+def test_poll_disabled_by_toggle(fake_ntfy, tmp_path):
+    daemon = make_daemon(fake_ntfy, tmp_path)
+    daemon.config.toggles.replies = False
+    assert daemon.poll_replies() == 0
+    assert fake_ntfy.gets() == []
+
+
+def test_poll_server_error_logged_not_raised(fake_ntfy, tmp_path, monkeypatch):
+    daemon = make_daemon(fake_ntfy, tmp_path)
+    fake_ntfy.fail_gets = 5
+    lines = []
+    monkeypatch.setattr(daemon, "_log_fn", lines.append)
+    assert daemon.poll_replies() == 0
+    assert any("poll" in line for line in lines)
+
+
+# -- run_once and serve --
+
+
+def test_run_once_flushes_and_polls(fake_ntfy, tmp_path):
+    daemon = make_daemon(fake_ntfy, tmp_path)
+    root = str(tmp_path / "spool")
+    spool_notify(root, "a")
+    spool_notify(root, "b")
+    fake_ntfy.queue_reply("ok", msg_id="r1")
+
+    result = daemon.run_once()
+
+    assert result["handled"] == 2
+    assert result["replies"] == 1
+    assert len(fake_ntfy.posts()) == 2
+    assert len(read_replies(tmp_path)) == 1
+
+
+def test_serve_runs_cycles_until_stop_requested(fake_ntfy, tmp_path):
+    daemon = make_daemon(fake_ntfy, tmp_path)
+    cycles = []
+    original = daemon.run_once
+
+    def counting():
+        cycles.append(1)
+        if len(cycles) >= 3:
+            daemon.request_stop()
+        return original()
+
+    daemon.run_once = counting
+    daemon.serve()
+    assert len(cycles) == 3
+
+
+def test_sigterm_handler_requests_stop(fake_ntfy, tmp_path):
+    import signal as signal_mod
+
+    daemon = make_daemon(fake_ntfy, tmp_path)
+    daemon._install_signal_handlers()
+    try:
+        import os as os_mod
+
+        os_mod.kill(os_mod.getpid(), signal_mod.SIGTERM)
+        assert daemon._stop is True
+    finally:
+        signal_mod.signal(signal_mod.SIGTERM, signal_mod.SIG_DFL)
