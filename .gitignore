@@ -1,0 +1,8 @@
+# python basics
+.venv/
+__pycache__/
+dist/
+.pytest_cache/
+
+# tugline local state
+.tugline-local/
