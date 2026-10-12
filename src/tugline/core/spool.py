@@ -27,7 +27,7 @@ DELIVERED_FILE = "delivered.json"
 
 
 def today_filename(now: datetime | None = None) -> str:
-    when = now or datetime.now(timezone.utc)
+    when = now.astimezone(timezone.utc) if now else datetime.now(timezone.utc)
     return when.strftime("%Y-%m-%d") + ".jsonl"
 
 
@@ -43,16 +43,94 @@ def append(
     actions=None,
     now=None,
 ) -> dict:
-    raise NotImplementedError("spool append not implemented yet")
+    """Append one record to today's file and return it."""
+    root = str(root)
+    when = now.astimezone(timezone.utc) if now else datetime.now(timezone.utc)
+
+    record = {
+        "id": uuid.uuid4().hex[:16],
+        "ts": when.isoformat(),
+        "event": event,
+        "session_id": session_id,
+        "topic": topic,
+        "priority": priority,
+        "title": title,
+        "body": body,
+    }
+    if actions:
+        record["actions"] = actions
+    record["delivered"] = False
+
+    os.makedirs(root, exist_ok=True)
+    line = json.dumps(record, separators=(",", ":")) + "\n"
+    with open(os.path.join(root, today_filename(when)), "a", encoding="utf-8") as fh:
+        fh.write(line)
+        fh.flush()
+    return record
+
+
+def _day_files(root):
+    try:
+        names = sorted(
+            name for name in os.listdir(root) if name.endswith(".jsonl")
+        )
+    except FileNotFoundError:
+        return
+    for name in names:
+        yield os.path.join(root, name)
 
 
 def records(root, on_error=None):
-    raise NotImplementedError("records not implemented yet")
+    """Yield every parseable record, oldest day first."""
+    for path in _day_files(root):
+        try:
+            with open(path, encoding="utf-8") as fh:
+                for line_no, line in enumerate(fh, start=1):
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        rec = json.loads(line)
+                    except json.JSONDecodeError:
+                        if on_error is not None:
+                            on_error("%s:%d" % (path, line_no))
+                        continue
+                    if isinstance(rec, dict):
+                        yield rec
+        except OSError as exc:
+            if on_error is not None:
+                on_error("%s: %s" % (path, exc))
+
+
+def delivered_ids(root) -> set:
+    path = os.path.join(str(root), DELIVERED_FILE)
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return set()
+    ids = data.get("ids", []) if isinstance(data, dict) else []
+    return {str(i) for i in ids}
 
 
 def undelivered(root, on_error=None):
-    raise NotImplementedError("undelivered not implemented yet")
+    """Yield records not yet marked delivered, oldest first."""
+    done = delivered_ids(root)
+    for rec in records(root, on_error=on_error):
+        if rec.get("id") not in done:
+            yield rec
 
 
 def mark_delivered(root, record_id) -> None:
-    raise NotImplementedError("mark_delivered not implemented yet")
+    root = str(root)
+    os.makedirs(root, exist_ok=True)
+    ids = delivered_ids(root)
+    ids.add(str(record_id))
+    path = os.path.join(root, DELIVERED_FILE)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump({"ids": sorted(ids)}, fh)
+        fh.write("\n")
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.replace(tmp, path)
