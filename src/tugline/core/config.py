@@ -24,7 +24,7 @@ idle_seconds = 600   # a Stop longer than this notifies even when not armed
 [toggles]
 notify  = true    # master switch for publishing notifications
 replies = true    # reply polling
-approve = false   # approve action buttons (not wired up yet)
+approve = false   # approve action buttons; needs the daemon receiver and a reachable external_url
 
 Anything unknown, missing a section header, or typed wrong is a loud
 one-line ConfigError. Python 3.10 ships no tomllib, so a small built-in
@@ -79,7 +79,8 @@ idle_seconds = 600
 # tugline was installed: nothing published, nothing polled.
 notify = true
 replies = true
-# Approve action buttons on notifications. Not wired up yet.
+# Approve action buttons on notifications; needs the daemon receiver
+# and a reachable external_url.
 approve = false
 """
 
