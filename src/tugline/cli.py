@@ -6,6 +6,7 @@ import os
 import sys
 
 from tugline import __version__
+from tugline.adapters.zcode import console as zcode_console
 from tugline.core import policy, spool, topics
 from tugline.core.config import ConfigError, load_config
 from tugline.core.daemon import Daemon
@@ -73,6 +74,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv=None) -> int:
+    zcode_console.shim(argv)  # zcode adapter surfaces exit here
     parser = build_parser()
     args = parser.parse_args(argv)
 
