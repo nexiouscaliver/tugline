@@ -173,6 +173,23 @@ def _session_cwd(normalized):
     return normalized.get("cwd") or normalized.get("project_dir")
 
 
+def _adapter_extra(normalized):
+    """Adapter, cwd, and project extra fields for the spool record.
+
+    cwd prefers the payload cwd field, then CLAUDE_PROJECT_DIR from
+    the environment, then the process cwd; project is the final path
+    segment of that cwd (or ""). String operations only, derived once
+    per run.
+    """
+    cwd = str(
+        normalized.get("cwd")
+        or os.environ.get("CLAUDE_PROJECT_DIR")
+        or os.getcwd()
+    )
+    project = cwd.rstrip("/").rsplit("/", 1)[-1]
+    return {"adapter": "claude", "cwd": cwd, "project": project}
+
+
 def run_event(event_name, stdin=None) -> int:
     """Run one hook event. Never raises; always returns an exit code."""
     try:
@@ -193,6 +210,7 @@ def _run(event_name, stdin) -> int:
     session = str(normalized.get("session_id") or "claude")
     key = event.lower()
     context_on = _context_titles_enabled()
+    extra = _adapter_extra(normalized)
 
     if key == "sessionstart":
         source = str(normalized.get("source") or "").strip().lower()
@@ -215,6 +233,7 @@ def _run(event_name, stdin) -> int:
             priority="low",
             title=title,
             body=body,
+            extra=extra,
         )
         _log(event, "spooled resume")
         return 0
@@ -237,6 +256,7 @@ def _run(event_name, stdin) -> int:
             priority="default",
             title=title,
             body=body,
+            extra=extra,
         )
         _log(event, "spooled stop")
         return 0
@@ -260,12 +280,13 @@ def _run(event_name, stdin) -> int:
             priority="default",
             title=title,
             body=body,
+            extra=extra,
         )
         _log(event, "spooled notification %s" % ntype)
         return 0
 
     if key == "permissionrequest":
-        decision = _permission_request(normalized, session, context_on)
+        decision = _permission_request(normalized, session, context_on, extra)
         if decision is None:
             _log(event, "permission request spooled")
         else:
@@ -278,7 +299,7 @@ def _run(event_name, stdin) -> int:
     return 0
 
 
-def _spool_plain_permission(normalized, session, context_on):
+def _spool_plain_permission(normalized, session, context_on, extra):
     """The permission record for when the approve flow is not active.
 
     Byte-identical to approve.publish_request's plain record when the
@@ -302,10 +323,11 @@ def _spool_plain_permission(normalized, session, context_on):
         priority="high",
         title=title,
         body=body,
+        extra=extra,
     )
 
 
-def _permission_request(normalized, session, context_on):
+def _permission_request(normalized, session, context_on, extra):
     try:
         config = load_config()
     except ConfigError:
@@ -313,7 +335,7 @@ def _permission_request(normalized, session, context_on):
     if config is None or not config.toggles.approve:
         # No usable config means no buttons and no wait: publish the
         # plain record and let the local prompt decide.
-        _spool_plain_permission(normalized, session, context_on)
+        _spool_plain_permission(normalized, session, context_on, extra)
         return None
     return approve.handle(
         normalized,
