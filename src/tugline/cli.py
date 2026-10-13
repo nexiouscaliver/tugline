@@ -70,6 +70,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     sub.add_parser("version", help="print the tugline version")
+    from tugline.adapters.claude.hook import register_hook_command; register_hook_command(sub)  # wiring: claude adapter hook command
     return parser
 
 
