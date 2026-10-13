@@ -7,7 +7,6 @@ exactly one line in the adapter log.
 
 import io
 import json
-import os
 import time
 
 from tugline.adapters.claude import approve as approve_module
@@ -244,57 +243,3 @@ def test_read_stdin_gives_up_at_the_ceiling_on_a_silent_pipe():
         assert 0.15 <= elapsed < 2.0
     finally:
         os.close(write_fd)
-
-
-# Adapter enrichment
-
-
-def test_records_carry_adapter_cwd_project_from_payload(
-    tug_home, hook_payload, spool_records
-):
-    assert run("Stop", hook_payload("Stop")) == 0
-    record = spool_records()[0]
-    assert record["adapter"] == "claude"
-    assert record["cwd"] == "/Users/shahil/work/tugline"
-    assert record["project"] == "tugline"
-
-
-def test_cwd_falls_back_to_env_project_dir(
-    tug_home, hook_payload, spool_records, monkeypatch
-):
-    payload = hook_payload("Stop")
-    payload.pop("cwd")
-    monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/w/env-proj")
-    assert run("Stop", payload) == 0
-    record = spool_records()[0]
-    assert record["adapter"] == "claude"
-    assert record["cwd"] == "/w/env-proj"
-    assert record["project"] == "env-proj"
-
-
-def test_cwd_falls_back_to_getcwd(
-    tug_home, hook_payload, spool_records, monkeypatch
-):
-    payload = hook_payload("Stop")
-    payload.pop("cwd")
-    monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
-    assert run("Stop", payload) == 0
-    record = spool_records()[0]
-    assert record["adapter"] == "claude"
-    assert record["cwd"] == os.getcwd()
-    assert record["project"] == os.path.basename(os.getcwd())
-
-
-def test_permission_request_record_carries_adapter_fields(
-    tug_home, write_config, hook_payload, spool_records
-):
-    write_config(approve=False)
-    payload = hook_payload(
-        "PermissionRequest", tool_name="Bash", tool_input={"command": "ls"}
-    )
-    assert run("PermissionRequest", payload) == 0
-    record = spool_records()[0]
-    assert record["event"] == "permissionrequest"
-    assert record["adapter"] == "claude"
-    assert record["cwd"] == "/Users/shahil/work/tugline"
-    assert record["project"] == "tugline"

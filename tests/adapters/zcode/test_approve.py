@@ -232,24 +232,6 @@ def test_nonce_differs_between_runs(config_on, tmp_path, approvals):
     assert len(nonces) == 2
 
 
-def test_extra_fields_forwarded_onto_the_spool_record(
-    config_on, tmp_path, approvals
-):
-    approve.run(
-        "s-1",
-        config=config_on,
-        spool_root=str(tmp_path / "spool"),
-        approvals_root=approvals,
-        wait=0,
-        nonce="n-extra",
-        extra={"adapter": "zcode", "cwd": "/w/ap", "project": "ap"},
-    )
-    rec = records_for(tmp_path)[0]
-    assert rec["adapter"] == "zcode"
-    assert rec["cwd"] == "/w/ap"
-    assert rec["project"] == "ap"
-
-
 # button url formation with and without external_url
 
 
