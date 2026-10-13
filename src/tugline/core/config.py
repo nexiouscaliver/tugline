@@ -1,17 +1,19 @@
 """Client configuration.
 
-The config file is ~/.tugline/config.toml, unless TUGLINE_CONFIG points
-somewhere else. On first run (file absent) a documented default
-template is written, then loaded.
+The config file is <tugline home>/config.toml (~/.tugline unless
+TUGLINE_HOME moves it), unless TUGLINE_CONFIG points somewhere else.
+On first run (file absent) a documented default template is written,
+then loaded.
 
 Supported sections and keys, all optional per key (drop a key to get
 its default, but keep the section headers):
 
 [server]
 url          = "http://127.0.0.1:2586"   # ntfy base URL
-token_file   = "~/.tugline/credentials"  # one line: the bearer token
+token_file   = "<home>/credentials"      # one line: the bearer token
 approve_port = 2587                      # loopback port for the approve receiver
 external_url = ""                        # base the approve buttons point at (empty keeps url)
+console_port = 2588                      # loopback port for the console
 
 [topics]
 main  = "tug"        # routine notifications
@@ -25,6 +27,7 @@ idle_seconds = 600   # a Stop longer than this notifies even when not armed
 notify  = true    # master switch for publishing notifications
 replies = true    # reply polling
 approve = false   # approve action buttons; needs the daemon receiver and a reachable external_url
+console = true    # the tug console command
 
 Anything unknown, missing a section header, or typed wrong is a loud
 one-line ConfigError. Python 3.10 ships no tomllib, so a small built-in
@@ -36,12 +39,15 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 
+from tugline.core import paths
+
 try:
     import tomllib
 except ModuleNotFoundError:  # Python 3.10
     tomllib = None
 
 DEFAULT_CONFIG_PATH = os.path.join("~", ".tugline", "config.toml")
+TOKEN_FILE_PLACEHOLDER = "__TUGLINE_TOKEN_FILE__"
 
 DEFAULT_TEMPLATE = """\
 # tugline client configuration.
@@ -53,7 +59,7 @@ DEFAULT_TEMPLATE = """\
 # ntfy base URL.
 url = "http://127.0.0.1:2586"
 # File holding the ntfy bearer token, one line. Never printed anywhere.
-token_file = "~/.tugline/credentials"
+token_file = "__TUGLINE_TOKEN_FILE__"
 # Loopback port the daemon's approve receiver listens on (the buttons
 # target it; 0 picks a free port, which tests use).
 approve_port = 2587
@@ -61,6 +67,9 @@ approve_port = 2587
 # example a tailnet serve host that proxies /approvals back to this
 # machine. Empty keeps url.
 external_url = ""
+# Loopback port the console serves on (0 picks a free port, which
+# tests use).
+console_port = 2588
 
 [topics]
 # main: routine notifications. warn: permission requests, urgent pings.
@@ -82,6 +91,8 @@ replies = true
 # Approve action buttons on notifications; needs the daemon receiver
 # and a reachable external_url.
 approve = false
+# The tug console: a loopback web view over this same home.
+console = true
 """
 
 _KNOWN = {
@@ -90,10 +101,11 @@ _KNOWN = {
         "token_file": str,
         "approve_port": int,
         "external_url": str,
+        "console_port": int,
     },
     "topics": {"main": str, "warn": str, "reply": str},
     "policy": {"idle_seconds": (int, float)},
-    "toggles": {"notify": bool, "replies": bool, "approve": bool},
+    "toggles": {"notify": bool, "replies": bool, "approve": bool, "console": bool},
 }
 
 _DEFAULTS = {
@@ -102,10 +114,11 @@ _DEFAULTS = {
         "token_file": "~/.tugline/credentials",
         "approve_port": 2587,
         "external_url": "",
+        "console_port": 2588,
     },
     "topics": {"main": "tug", "warn": "tug-warn", "reply": "tug-reply"},
     "policy": {"idle_seconds": 600},
-    "toggles": {"notify": True, "replies": True, "approve": False},
+    "toggles": {"notify": True, "replies": True, "approve": False, "console": True},
 }
 
 
@@ -119,6 +132,7 @@ class ServerConfig:
     token_file: str
     approve_port: int = 2587
     external_url: str = ""
+    console_port: int = 2588
 
     @property
     def action_base(self):
@@ -145,6 +159,7 @@ class TogglesConfig:
     notify: bool
     replies: bool
     approve: bool
+    console: bool = True
 
 
 @dataclass
@@ -162,7 +177,7 @@ def _resolve_path(path=None):
     env = os.environ.get("TUGLINE_CONFIG")
     if env:
         return os.path.expanduser(env)
-    return os.path.expanduser(DEFAULT_CONFIG_PATH)
+    return os.path.join(paths.home_root(), "config.toml")
 
 
 def load_config(path=None) -> Config:
@@ -182,9 +197,11 @@ def load_config(path=None) -> Config:
 
 def _write_template(target):
     os.makedirs(os.path.dirname(target), exist_ok=True)
+    token_default = os.path.join(paths.home_root(), "credentials")
+    text = DEFAULT_TEMPLATE.replace(TOKEN_FILE_PLACEHOLDER, token_default)
     tmp = target + ".tmp"
     with open(tmp, "w", encoding="utf-8") as fh:
-        fh.write(DEFAULT_TEMPLATE)
+        fh.write(text)
     os.replace(tmp, target)
 
 
@@ -294,6 +311,11 @@ def _build(data, path):
         raise ConfigError(
             "config [server] approve_port must be between 0 and 65535: %s" % path
         )
+    console_port = _check_type(server, "server", "console_port", int, path)
+    if not 0 <= console_port <= 65535:
+        raise ConfigError(
+            "config [server] console_port must be between 0 and 65535: %s" % path
+        )
     external_url = _check_type(server, "server", "external_url", str, path)
     if external_url and not (
         external_url.startswith("http://")
@@ -310,7 +332,7 @@ def _build(data, path):
     idle = _check_type(policy, "policy", "idle_seconds", (int, float), path)
     if isinstance(idle, bool) or idle <= 0:
         raise ConfigError("config [policy] idle_seconds must be a positive number: %s" % path)
-    for key in ("notify", "replies", "approve"):
+    for key in ("notify", "replies", "approve", "console"):
         _check_type(toggles, "toggles", key, bool, path)
 
     return Config(
@@ -319,6 +341,7 @@ def _build(data, path):
             token_file=os.path.expanduser(token_file),
             approve_port=approve_port,
             external_url=external_url,
+            console_port=console_port,
         ),
         topics=TopicsConfig(
             main=topics["main"], warn=topics["warn"], reply=topics["reply"]
@@ -328,6 +351,7 @@ def _build(data, path):
             notify=toggles["notify"],
             replies=toggles["replies"],
             approve=toggles["approve"],
+            console=toggles["console"],
         ),
         path=path,
     )
