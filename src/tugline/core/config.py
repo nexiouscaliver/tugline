@@ -11,6 +11,7 @@ its default, but keep the section headers):
 url          = "http://127.0.0.1:2586"   # ntfy base URL
 token_file   = "~/.tugline/credentials"  # one line: the bearer token
 approve_port = 2587                      # loopback port for the approve receiver
+external_url = ""                        # base the approve buttons point at (empty keeps url)
 
 [topics]
 main  = "tug"        # routine notifications
@@ -56,6 +57,10 @@ token_file = "~/.tugline/credentials"
 # Loopback port the daemon's approve receiver listens on (the buttons
 # target it; 0 picks a free port, which tests use).
 approve_port = 2587
+# Base URL the approve buttons point at when it differs from url, for
+# example a tailnet serve host that proxies /approvals back to this
+# machine. Empty keeps url.
+external_url = ""
 
 [topics]
 # main: routine notifications. warn: permission requests, urgent pings.
@@ -79,7 +84,12 @@ approve = false
 """
 
 _KNOWN = {
-    "server": {"url": str, "token_file": str, "approve_port": int},
+    "server": {
+        "url": str,
+        "token_file": str,
+        "approve_port": int,
+        "external_url": str,
+    },
     "topics": {"main": str, "warn": str, "reply": str},
     "policy": {"idle_seconds": (int, float)},
     "toggles": {"notify": bool, "replies": bool, "approve": bool},
@@ -90,6 +100,7 @@ _DEFAULTS = {
         "url": "http://127.0.0.1:2586",
         "token_file": "~/.tugline/credentials",
         "approve_port": 2587,
+        "external_url": "",
     },
     "topics": {"main": "tug", "warn": "tug-warn", "reply": "tug-reply"},
     "policy": {"idle_seconds": 600},
@@ -106,6 +117,14 @@ class ServerConfig:
     url: str
     token_file: str
     approve_port: int = 2587
+    external_url: str = ""
+
+    @property
+    def action_base(self):
+        """Base URL the approve buttons point at: external_url when it
+        is set (a host that routes /approvals back to this machine's
+        receiver), the ntfy url otherwise."""
+        return (self.external_url or self.url).rstrip("/")
 
 
 @dataclass
@@ -274,6 +293,15 @@ def _build(data, path):
         raise ConfigError(
             "config [server] approve_port must be between 0 and 65535: %s" % path
         )
+    external_url = _check_type(server, "server", "external_url", str, path)
+    if external_url and not (
+        external_url.startswith("http://")
+        or external_url.startswith("https://")
+    ):
+        raise ConfigError(
+            "config [server] external_url must start with http:// or "
+            "https://, or be empty: %s" % path
+        )
     for key in ("main", "warn", "reply"):
         value = _check_type(topics, "topics", key, str, path)
         if not value:
@@ -289,6 +317,7 @@ def _build(data, path):
             url=url,
             token_file=os.path.expanduser(token_file),
             approve_port=approve_port,
+            external_url=external_url,
         ),
         topics=TopicsConfig(
             main=topics["main"], warn=topics["warn"], reply=topics["reply"]

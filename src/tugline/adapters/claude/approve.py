@@ -48,22 +48,36 @@ def effective_timeout(timeout) -> float:
 
 
 def action_buttons(config, approve_id):
-    """The Approve and Deny http buttons for the flagged record."""
-    base = config.server.url.rstrip("/")
-    return [
-        {
+    """The Approve and Deny http buttons for the flagged record.
+
+    The base comes from [server] external_url when set (a proxy host
+    routing /approvals back to this machine), the ntfy url otherwise.
+    When a token is configured the buttons carry it, so the receiver
+    can authenticate the press; without a token the buttons go out
+    bare and the receiver runs open, loopback only.
+    """
+    from tugline.core.publisher import Publisher
+
+    base = config.server.action_base.rstrip("/")
+    headers = None
+    token = Publisher(
+        config.server.url, config.server.token_file
+    ).read_token()
+    if token:
+        headers = {"Authorization": "Bearer " + token}
+    buttons = []
+    for label, decision in (("Approve", "allow"), ("Deny", "deny")):
+        button = {
             "action": "http",
-            "label": "Approve",
-            "url": "%s/%s/%s?decision=allow" % (base, APPROVALS_DIRNAME, approve_id),
+            "label": label,
+            "url": "%s/%s/%s?decision=%s"
+            % (base, APPROVALS_DIRNAME, approve_id, decision),
             "method": "POST",
-        },
-        {
-            "action": "http",
-            "label": "Deny",
-            "url": "%s/%s/%s?decision=deny" % (base, APPROVALS_DIRNAME, approve_id),
-            "method": "POST",
-        },
-    ]
+        }
+        if headers:
+            button["headers"] = dict(headers)
+        buttons.append(button)
+    return buttons
 
 
 def decision_path(state_root, approve_id) -> str:

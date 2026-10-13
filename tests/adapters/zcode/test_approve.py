@@ -273,10 +273,14 @@ def test_button_urls_use_external_url_when_set(tmp_path, approvals):
 def test_buttons_carry_the_bearer_token_header(tmp_path, approvals):
     creds = tmp_path / "creds"
     creds.write_text("tk_zcode_button\n", encoding="utf-8")
-    config = config_with(
-        tmp_path,
-        'token_file = "%s"' % creds,
+    text = CONFIG_APPROVE_ON.replace(
+        'token_file = "~/.tugline/credentials"', 'token_file = "%s"' % creds
     )
+    path = tmp_path / "config-tok.toml"
+    path.write_text(text, encoding="utf-8")
+    from tugline.core.config import load_config
+
+    config = load_config(str(path))
     approve.run(
         "s-1",
         config=config,

@@ -22,7 +22,6 @@ from __future__ import annotations
 import json
 import os
 import time
-import urllib.parse
 import uuid
 
 from tugline.core import spool
@@ -58,22 +57,36 @@ def effective_wait(wait=None):
     return max(0.0, min(float(raw), HARD_CAP))
 
 
-def request_actions(base_url, session_id, nonce):
-    """Approve/Deny buttons hitting the daemon decision endpoints."""
-    base = str(base_url).rstrip("/")
-    sid = urllib.parse.quote(str(session_id), safe="")
-    return [
-        {
+def request_actions(config, nonce):
+    """Approve/Deny buttons hitting the daemon decision endpoints.
+
+    Both buttons POST to the receiver path /approvals/{nonce} with the
+    decision in the query. The base comes from [server] external_url
+    when set (a proxy host routing /approvals back to this machine),
+    the ntfy url otherwise. When a token is configured the buttons
+    carry it, so the receiver can authenticate the press.
+    """
+    from tugline.core.publisher import Publisher
+
+    base = config.server.action_base.rstrip("/")
+    headers = None
+    token = Publisher(
+        config.server.url, config.server.token_file
+    ).read_token()
+    if token:
+        headers = {"Authorization": "Bearer " + token}
+    actions = []
+    for label, decision in (("Approve", "allow"), ("Deny", "deny")):
+        action = {
             "action": "http",
-            "label": "Approve",
-            "url": "%s/approve?session=%s&nonce=%s" % (base, sid, nonce),
-        },
-        {
-            "action": "http",
-            "label": "Deny",
-            "url": "%s/deny?session=%s&nonce=%s" % (base, sid, nonce),
-        },
-    ]
+            "label": label,
+            "url": "%s/approvals/%s?decision=%s" % (base, nonce, decision),
+            "method": "POST",
+        }
+        if headers:
+            action["headers"] = dict(headers)
+        actions.append(action)
+    return actions
 
 
 def pending_path(approvals_root, nonce) -> str:
@@ -155,7 +168,7 @@ def run(
             title="permission request",
             body="session %s asks permission, approve or deny from the phone"
             % short,
-            actions=request_actions(config.server.url, session_id, token),
+            actions=request_actions(config, token),
         )
     except OSError:
         return None

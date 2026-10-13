@@ -135,10 +135,15 @@ def _format_actions(actions):
         if not isinstance(action, dict):
             continue
         pieces = []
-        for key in ("action", "label", "url", "method", "body", "headers"):
+        for key in ("action", "label", "url", "method", "body"):
             value = action.get(key)
             if value is not None:
                 pieces.append("%s=%s" % (key, value))
+        headers = action.get("headers")
+        if isinstance(headers, dict):
+            # ntfy spells per-action headers as headers.<name>=<value>
+            for name, value in headers.items():
+                pieces.append("headers.%s=%s" % (name, value))
         if pieces:
             parts.append(", ".join(pieces))
     return "; ".join(parts) if parts else None
