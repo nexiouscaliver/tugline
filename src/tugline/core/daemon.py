@@ -203,10 +203,19 @@ class Daemon:
         base = self.config.server.url.rstrip("/")
         topic = topics.resolve(topics.REPLY, self.config)
         since = self._load_cursor()
-        count = self._open_stream(base, topic, since)
+        count, code = self._open_stream(base, topic, since)
+        if count is None and since == "all" and code in (400, 413):
+            # a server that refuses since=all (an unacceptably huge
+            # cache) gets a one hour window instead; anything else
+            # (429, 5xx, network) is a real error and gets no retry
+            fallback = str(int(time.time()) - 3600)
+            self.log("reply stream refused since=all, retrying one hour back")
+            count, code = self._open_stream(base, topic, fallback)
         return count or 0
 
     def _open_stream(self, base, topic, since):
+        """Open one stream; returns (captured, error_code). count is
+        None only when the stream could not be established."""
         url = "%s/%s/json?since=%s" % (
             base,
             urllib.parse.quote(topic),
@@ -221,15 +230,15 @@ class Daemon:
             with urllib.request.urlopen(
                 request, timeout=self.stream_timeout
             ) as resp:
-                return self._read_stream_lines(resp, topic)
+                return self._read_stream_lines(resp, topic), None
         except urllib.error.HTTPError as exc:
             self.stream_status = "error"
             self.log("reply stream failed: HTTP %d" % exc.code)
-            return None
+            return None, exc.code
         except (urllib.error.URLError, OSError) as exc:
             self.stream_status = "error"
             self.log("reply stream failed: %s" % (getattr(exc, "reason", exc),))
-            return None
+            return None, None
 
     def _read_stream_lines(self, resp, topic) -> int:
         count = 0
@@ -333,12 +342,20 @@ class Daemon:
         return os.path.join(self.state_root, "reply_cursor.json")
 
     def _load_cursor(self):
+        """The since value for the next reply request.
+
+        With no cursor file yet (first run, or the state file was
+        lost) the answer is "all": the server cache is bounded, and a
+        reply published before the first capture is exactly the one a
+        fresh daemon must not miss. The first seen id then becomes the
+        cursor, so this happens once.
+        """
         try:
             with open(self._cursor_path(), encoding="utf-8") as fh:
                 data = json.load(fh)
             return data["last_id"]
         except (OSError, ValueError, KeyError, TypeError):
-            return str(int(time.time()))
+            return "all"
 
     def _save_cursor(self, last_id):
         os.makedirs(self.state_root, exist_ok=True)
