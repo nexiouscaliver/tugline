@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Notification titles and bodies now carry session context: titles read
+  "[harness] project - plain summary" (for example "[zcode] mission-control -
+  waiting for your input") and bodies lead with "session <last 6 of the id>"
+  plus a comma separated detail such as "permission: Bash" or an 80 character
+  turn preview; raw Claude notification type strings no longer reach the
+  phone. Set `[toggles] context_titles = false` to restore the exact previous
+  title and body strings in both adapters.
+
 ### Fixed
 
 - Daemon flush path: a healthy ntfy reply stream never ended on its own

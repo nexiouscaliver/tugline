@@ -63,3 +63,52 @@ def normalize(raw):
 def event_name(normalized):
     """Return the hook event name (for example "Stop") or None."""
     return normalized.get("hook_event_name")
+
+
+# Notification context enrichment (W6-L12). Every adapter notification
+# must answer, at a glance: which harness, which project, finished or
+# waiting, and which session. The helpers below are pure string
+# formatting; everything they need already sits in the hook payload.
+
+def short_session_id(session_id) -> str:
+    """The last 6 characters of the session id (whole id when shorter)."""
+    text = str(session_id or "")
+    return text[-6:]
+
+
+def project_label(cwd) -> str:
+    """The last path component of the session cwd, or "unknown".
+
+    The component is used as-is (no case folding, no full paths), so
+    the label on the phone matches the directory the operator knows.
+    """
+    text = str(cwd or "").strip()
+    if not text:
+        return "unknown"
+    label = text.rstrip("/").rsplit("/", 1)[-1].strip()
+    return label or "unknown"
+
+
+def context_title(harness, cwd, summary) -> str:
+    """"[zcode] mission-control - waiting for your input"."""
+    return "[%s] %s - %s" % (harness, project_label(cwd), summary)
+
+
+def context_body(session_id, detail="") -> str:
+    """Body first line "session <short6>", then a comma separated detail."""
+    line = "session %s" % short_session_id(session_id)
+    detail = " ".join(str(detail or "").split())
+    return "%s, %s" % (line, detail) if detail else line
+
+
+def one_line_preview(normalized, limit=80) -> str:
+    """Single-line turn preview from the payload, truncated to limit.
+
+    Prefers last_assistant_message, then response_preview. Newlines and
+    runs of whitespace collapse to single spaces; empty when neither
+    field carries anything.
+    """
+    text = normalized.get("last_assistant_message")
+    if not text:
+        text = normalized.get("response_preview")
+    return " ".join(str(text or "").split())[:limit]

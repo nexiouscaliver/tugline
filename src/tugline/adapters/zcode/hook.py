@@ -119,7 +119,8 @@ def _short(session_id):
     return str(session_id)[:8]
 
 
-def _record_fields(event, normalized, decision, session_id):
+def _legacy_record_fields(event, normalized, decision, session_id):
+    """The exact title and body strings from before context enrichment."""
     if event == "permissionrequest":
         tool = str(normalized.get("tool_name") or "tool use")
         title = "permission request"
@@ -140,6 +141,43 @@ def _record_fields(event, normalized, decision, session_id):
     else:
         title = event or "hook event"
         body = "session %s" % _short(session_id)
+    topic = decision.topic if decision.action == "publish" else "main"
+    priority = decision.priority if decision.action == "publish" else "default"
+    return topic, priority, title, body
+
+
+def _record_fields(event, normalized, decision, session_id, context_on, cwd):
+    """Topic, priority, title, body for one record.
+
+    With context_on the title answers, at a glance, which harness,
+    which project, and finished versus waiting; the body leads with
+    "session <short6>" plus a comma separated detail. With context off
+    the legacy strings come back byte for byte.
+    """
+    if not context_on:
+        return _legacy_record_fields(event, normalized, decision, session_id)
+
+    if event == "permissionrequest":
+        tool = str(normalized.get("tool_name") or "tool use")
+        summary = "waiting for your input"
+        detail = "permission: %s" % tool
+    elif event == "sessionstart":
+        source = str(normalized.get("source") or "").strip().lower()
+        if source == "resume":
+            summary, detail = "session resumed", "resumed"
+        else:
+            summary, detail = "session started", "started"
+    elif event == "stop":
+        summary = "turn finished"
+        detail = payload.one_line_preview(normalized) or "turn finished"
+    elif event == "userpromptsubmit":
+        summary = "prompt submitted"
+        prompt = str(normalized.get("prompt") or "")
+        detail = ("prompt: %s" % prompt[:60]).rstrip() if prompt else ""
+    else:
+        summary, detail = event or "hook event", ""
+    title = payload.context_title("zcode", cwd, summary)
+    body = payload.context_body(session_id, detail)
     topic = decision.topic if decision.action == "publish" else "main"
     priority = decision.priority if decision.action == "publish" else "default"
     return topic, priority, title, body
@@ -229,7 +267,12 @@ def _run(event_arg, stdin_text, *, home, env, config_path, out):
         return 0
 
     topic, priority, title, body = _record_fields(
-        event, normalized, decision, session_id
+        event,
+        normalized,
+        decision,
+        session_id,
+        config.toggles.context_titles,
+        normalized.get("cwd") or normalized.get("project_dir"),
     )
     spool.append(
         spool_root,

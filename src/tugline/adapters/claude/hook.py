@@ -11,11 +11,16 @@ on stdin. This module is the tugline side of that contract:
                    resume (a fresh startup is not worth a ping)
     Stop         -> a stop record; the core armed/idle policy decides
                    downstream whether it notifies
-    Notification -> a notify with the notification type in the body;
-                   idle_prompt and agent_completed are the two that
-                   matter
+    Notification -> a notify; the classified type maps onto a plain
+                   summary ("waiting for your input" for idle prompts,
+                   "turn finished" for completions) and the raw type
+                   string never reaches the phone
     PermissionRequest -> a high priority warn record, plus the bounded
                    remote approve handoff when the toggle is on
+- titles and bodies carry session context ("[claude] project - turn
+  finished", body leading "session <short6>") unless the
+  [toggles] context_titles switch is off, which restores the exact
+  strings from before the enrichment,
 - keep stdout EMPTY unless a permission decision is being returned,
 - log exactly one line per run under ~/.tugline/logs/.
 
@@ -120,6 +125,54 @@ def classify_notification(message) -> str:
     return "generic"
 
 
+# Plain notification summaries for the enriched titles. The classified
+# ntype strings (idle_prompt, agent_completed, generic) stay internal:
+# they never reach the phone raw again.
+_NOTIFICATION_SUMMARIES = {
+    "idle_prompt": "waiting for your input",
+    "agent_completed": "turn finished",
+    "generic": "notification",
+}
+
+
+def _context_titles_enabled() -> bool:
+    """Read [toggles] context_titles without ever writing a config.
+
+    A tolerant one-file probe: TUGLINE_CONFIG wins, otherwise the
+    config next to the adapter home (which is ~/.tugline in
+    production). Any missing file, unparsable line, or unknown value
+    leaves the toggle at its default, and nothing is ever created.
+    """
+    path = os.environ.get("TUGLINE_CONFIG") or os.path.join(
+        paths.home_root(), "config.toml"
+    )
+    try:
+        with open(path, encoding="utf-8") as fh:
+            text = fh.read()
+    except OSError:
+        return True
+    section = ""
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            section = line[1:-1].strip().lower()
+            continue
+        if section != "toggles":
+            continue
+        key, sep, rest = line.partition("=")
+        if not sep or key.strip() != "context_titles":
+            continue
+        value = rest.split("#", 1)[0].strip().strip('"').lower()
+        return value != "false"
+    return True
+
+
+def _session_cwd(normalized):
+    return normalized.get("cwd") or normalized.get("project_dir")
+
+
 def run_event(event_name, stdin=None) -> int:
     """Run one hook event. Never raises; always returns an exit code."""
     try:
@@ -139,33 +192,51 @@ def _run(event_name, stdin) -> int:
     event = str(event_name or normalized.get("hook_event_name") or "").strip()
     session = str(normalized.get("session_id") or "claude")
     key = event.lower()
+    context_on = _context_titles_enabled()
 
     if key == "sessionstart":
         source = str(normalized.get("source") or "").strip().lower()
         if source != "resume":
             _log(event, "session start is not a resume")
             return 0
+        if context_on:
+            title = payload_module.context_title(
+                "claude", _session_cwd(normalized), "session resumed"
+            )
+            body = payload_module.context_body(session, "resumed")
+        else:
+            title = "claude session resumed"
+            body = "session %s resumed" % session
         spool.append(
             paths.spool_root(),
             event="notify",
             session_id=session,
             topic="main",
             priority="low",
-            title="claude session resumed",
-            body="session %s resumed" % session,
+            title=title,
+            body=body,
         )
         _log(event, "spooled resume")
         return 0
 
     if key == "stop":
+        if context_on:
+            title = payload_module.context_title(
+                "claude", _session_cwd(normalized), "turn finished"
+            )
+            detail = payload_module.one_line_preview(normalized) or "turn finished"
+            body = payload_module.context_body(session, detail)
+        else:
+            title = "claude turn finished"
+            body = "session %s turn finished" % session
         spool.append(
             paths.spool_root(),
             event="stop",
             session_id=session,
             topic="main",
             priority="default",
-            title="claude turn finished",
-            body="session %s turn finished" % session,
+            title=title,
+            body=body,
         )
         _log(event, "spooled stop")
         return 0
@@ -173,20 +244,28 @@ def _run(event_name, stdin) -> int:
     if key == "notification":
         message = normalized.get("message") or normalized.get("title") or ""
         ntype = classify_notification(message)
+        if context_on:
+            title = payload_module.context_title(
+                "claude", _session_cwd(normalized), _NOTIFICATION_SUMMARIES[ntype]
+            )
+            body = payload_module.context_body(session, message)
+        else:
+            title = "claude %s" % ntype
+            body = ("%s: %s" % (ntype, message)).rstrip(": ")
         spool.append(
             paths.spool_root(),
             event="notify",
             session_id=session,
             topic="main",
             priority="default",
-            title="claude %s" % ntype,
-            body=("%s: %s" % (ntype, message)).rstrip(": "),
+            title=title,
+            body=body,
         )
         _log(event, "spooled notification %s" % ntype)
         return 0
 
     if key == "permissionrequest":
-        decision = _permission_request(normalized, session)
+        decision = _permission_request(normalized, session, context_on)
         if decision is None:
             _log(event, "permission request spooled")
         else:
@@ -199,19 +278,42 @@ def _run(event_name, stdin) -> int:
     return 0
 
 
-def _permission_request(normalized, session):
+def _spool_plain_permission(normalized, session, context_on):
+    """The permission record for when the approve flow is not active.
+
+    Byte-identical to approve.publish_request's plain record when the
+    context toggle is off; enriched with session context when on.
+    """
+    tool = str(normalized.get("tool_name") or "tool")
+    summary = approve.summarize_input(normalized.get("tool_input"))
+    if context_on:
+        title = payload_module.context_title(
+            "claude", _session_cwd(normalized), "waiting for your input"
+        )
+        body = payload_module.context_body(session, "permission: %s" % tool)
+    else:
+        title = "claude permission request"
+        body = (tool + " " + summary).rstrip()
+    spool.append(
+        paths.spool_root(),
+        event="permissionrequest",
+        session_id=session,
+        topic="warn",
+        priority="high",
+        title=title,
+        body=body,
+    )
+
+
+def _permission_request(normalized, session, context_on):
     try:
         config = load_config()
     except ConfigError:
         config = None
-    if config is None:
+    if config is None or not config.toggles.approve:
         # No usable config means no buttons and no wait: publish the
-        # plain high priority record and let the local prompt decide.
-        approve.publish_request(
-            normalized,
-            session_id=session,
-            spool_root=paths.spool_root(),
-        )
+        # plain record and let the local prompt decide.
+        _spool_plain_permission(normalized, session, context_on)
         return None
     return approve.handle(
         normalized,

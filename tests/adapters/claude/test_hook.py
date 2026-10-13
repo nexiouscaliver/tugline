@@ -32,7 +32,7 @@ def test_stop_spools_a_stop_record(tug_home, hook_payload, spool_records, capsys
     assert record["session_id"] == "sess-4f2a"
     assert record["topic"] == "main"
     assert record["priority"] == "default"
-    assert record["title"] == "claude turn finished"
+    assert record["title"] == "[claude] tugline - turn finished"
     assert capsys.readouterr().out == ""
 
 
@@ -48,7 +48,7 @@ def test_session_start_resume_spools_a_low_notify(
     assert record["event"] == "notify"
     assert record["priority"] == "low"
     assert record["topic"] == "main"
-    assert record["title"] == "claude session resumed"
+    assert record["title"] == "[claude] tugline - session resumed"
 
 
 def test_session_start_startup_spools_nothing(tug_home, hook_payload, spool_records):
@@ -78,8 +78,8 @@ def test_notification_idle_prompt_type_lands_in_the_body(
     assert run("Notification", payload) == 0
     record = spool_records()[0]
     assert record["event"] == "notify"
-    assert record["title"] == "claude idle_prompt"
-    assert record["body"] == "idle_prompt: Claude is waiting for your input"
+    assert record["title"] == "[claude] tugline - waiting for your input"
+    assert record["body"] == "session s-4f2a, Claude is waiting for your input"
 
 
 def test_notification_agent_completed_type_lands_in_the_body(
@@ -88,8 +88,8 @@ def test_notification_agent_completed_type_lands_in_the_body(
     payload = hook_payload("Notification", message="Claude has finished the task")
     assert run("Notification", payload) == 0
     record = spool_records()[0]
-    assert record["title"] == "claude agent_completed"
-    assert record["body"] == "agent_completed: Claude has finished the task"
+    assert record["title"] == "[claude] tugline - turn finished"
+    assert record["body"] == "session s-4f2a, Claude has finished the task"
 
 
 def test_notification_generic_keeps_the_raw_message(
@@ -98,8 +98,8 @@ def test_notification_generic_keeps_the_raw_message(
     payload = hook_payload("Notification", message="A tool wants attention")
     assert run("Notification", payload) == 0
     record = spool_records()[0]
-    assert record["title"] == "claude generic"
-    assert record["body"] == "generic: A tool wants attention"
+    assert record["title"] == "[claude] tugline - notification"
+    assert record["body"] == "session s-4f2a, A tool wants attention"
 
 
 def test_notification_without_message_falls_back_to_the_title(
@@ -108,7 +108,7 @@ def test_notification_without_message_falls_back_to_the_title(
     payload = hook_payload("Notification", title="Claude needs your permission")
     assert run("Notification", payload) == 0
     record = spool_records()[0]
-    assert record["body"] == "generic: Claude needs your permission"
+    assert record["body"] == "session s-4f2a, Claude needs your permission"
 
 
 # Payload normalization
@@ -188,7 +188,7 @@ def test_permission_request_without_approve_spools_a_plain_warn_record(
     assert record["topic"] == "warn"
     assert record["priority"] == "high"
     assert "actions" not in record
-    assert record["body"].startswith("Bash")
+    assert record["body"] == "session s-4f2a, permission: Bash"
 
 
 def test_permission_request_with_approve_prints_the_exact_decision_json(

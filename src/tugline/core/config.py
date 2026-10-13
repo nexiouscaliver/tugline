@@ -25,6 +25,7 @@ idle_seconds = 600   # a Stop longer than this notifies even when not armed
 notify  = true    # master switch for publishing notifications
 replies = true    # reply polling
 approve = false   # approve action buttons; needs the daemon receiver and a reachable external_url
+context_titles = true  # session context in notification titles and bodies ("[claude] project - turn finished")
 
 Anything unknown, missing a section header, or typed wrong is a loud
 one-line ConfigError. Python 3.10 ships no tomllib, so a small built-in
@@ -82,6 +83,9 @@ replies = true
 # Approve action buttons on notifications; needs the daemon receiver
 # and a reachable external_url.
 approve = false
+# Session context (harness, project, session, finished vs waiting) in
+# adapter notification titles and bodies. Off restores the plain strings.
+context_titles = true
 """
 
 _KNOWN = {
@@ -93,7 +97,12 @@ _KNOWN = {
     },
     "topics": {"main": str, "warn": str, "reply": str},
     "policy": {"idle_seconds": (int, float)},
-    "toggles": {"notify": bool, "replies": bool, "approve": bool},
+    "toggles": {
+        "notify": bool,
+        "replies": bool,
+        "approve": bool,
+        "context_titles": bool,
+    },
 }
 
 _DEFAULTS = {
@@ -105,7 +114,12 @@ _DEFAULTS = {
     },
     "topics": {"main": "tug", "warn": "tug-warn", "reply": "tug-reply"},
     "policy": {"idle_seconds": 600},
-    "toggles": {"notify": True, "replies": True, "approve": False},
+    "toggles": {
+        "notify": True,
+        "replies": True,
+        "approve": False,
+        "context_titles": True,
+    },
 }
 
 
@@ -145,6 +159,7 @@ class TogglesConfig:
     notify: bool
     replies: bool
     approve: bool
+    context_titles: bool = True
 
 
 @dataclass
@@ -310,7 +325,7 @@ def _build(data, path):
     idle = _check_type(policy, "policy", "idle_seconds", (int, float), path)
     if isinstance(idle, bool) or idle <= 0:
         raise ConfigError("config [policy] idle_seconds must be a positive number: %s" % path)
-    for key in ("notify", "replies", "approve"):
+    for key in ("notify", "replies", "approve", "context_titles"):
         _check_type(toggles, "toggles", key, bool, path)
 
     return Config(
@@ -328,6 +343,7 @@ def _build(data, path):
             notify=toggles["notify"],
             replies=toggles["replies"],
             approve=toggles["approve"],
+            context_titles=toggles["context_titles"],
         ),
         path=path,
     )
