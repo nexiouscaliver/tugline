@@ -498,18 +498,20 @@ class Store:
     def events(self, limit=50, session_id=None) -> list:
         """Events newest first; one session when session_id is given.
 
-        Ids follow spool order (oldest first), so id DESC is newest
-        first.
+        Ordered by ts, not by insertion id: spool records can arrive
+        with out-of-order timestamps, so id order is not chronological.
+        The ISO-8601 strings from datetime.isoformat sort correctly as
+        plain text; id DESC tiebreaks identical timestamps.
         """
         if session_id is None:
             rows = self.conn.execute(
-                "SELECT * FROM events ORDER BY id DESC LIMIT ?",
+                "SELECT * FROM events ORDER BY ts DESC, id DESC LIMIT ?",
                 (int(limit),),
             ).fetchall()
         else:
             rows = self.conn.execute(
                 "SELECT * FROM events WHERE session_id = ?"
-                " ORDER BY id DESC LIMIT ?",
+                " ORDER BY ts DESC, id DESC LIMIT ?",
                 (str(session_id), int(limit)),
             ).fetchall()
         return [dict(row) for row in rows]
