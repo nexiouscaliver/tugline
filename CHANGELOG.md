@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `tug version` now reports the installed distribution version instead of a stale hardcoded 0.1.0.
+
 ## [0.2.0] - 2026-10-13
 
 ### Changed
