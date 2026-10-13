@@ -304,7 +304,9 @@ def test_refresh_threads_open_answered_expired(tmp_path):
     assert all(t["status"] == "open" for t in store.threads())
 
     counts = store.refresh_threads(str(approvals))
-    assert counts == {"answered": 1, "open": 0, "expired": 2}
+    # one thread answered, one held open by its pending marker, one
+    # expired with neither file; only changed rows count
+    assert counts == {"answered": 1, "open": 0, "expired": 1}
     by_nonce = {t["nonce"]: t for t in store.threads()}
     assert by_nonce[n_open]["status"] == "open"
     assert by_nonce[n_done]["status"] == "answered"
