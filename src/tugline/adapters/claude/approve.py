@@ -25,6 +25,7 @@ import os
 import time
 import uuid
 
+from tugline.core import payload as payload_module
 from tugline.core import spool
 
 DEFAULT_TIMEOUT = 120.0
@@ -153,11 +154,34 @@ def publish_request(
     approve_id=None,
     state_root=None,
 ):
-    """Append the permission request record; buttons only when approve is on."""
+    """Append the permission request record; buttons only when approve is on.
+
+    The record carries session context through the shared payload
+    helpers (same format as the hook records): the project comes from
+    the payload's cwd or project_dir ("unknown" when neither is
+    present) and the body keeps the tool and its summarized input
+    after the "session <short6>, permission: " prefix. Without a
+    config the context defaults on, matching the hook's own plain
+    path for the no-config case; with
+    [toggles] context_titles = false the exact legacy strings come
+    back byte for byte.
+    """
     approve_id = approve_id or new_approve_id()
     tool = str(payload.get("tool_name") or "tool")
     summary = summarize_input(payload.get("tool_input"))
-    body = (tool + " " + summary).rstrip()
+    context_on = config is None or config.toggles.context_titles
+    if context_on:
+        title = payload_module.context_title(
+            "claude",
+            payload.get("cwd") or payload.get("project_dir"),
+            "waiting for your input",
+        )
+        body = payload_module.context_body(
+            session_id, ("permission: %s %s" % (tool, summary)).rstrip()
+        )
+    else:
+        title = "claude permission request"
+        body = (tool + " " + summary).rstrip()
     actions = None
     if config is not None and config.toggles.approve:
         actions = action_buttons(config, approve_id)
@@ -170,7 +194,7 @@ def publish_request(
             session_id=session_id,
             topic="warn",
             priority="high",
-            title="claude permission request",
+            title=title,
             body=body,
             actions=actions,
         ),

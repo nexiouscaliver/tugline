@@ -16,6 +16,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   turn preview; raw Claude notification type strings no longer reach the
   phone. Set `[toggles] context_titles = false` to restore the exact previous
   title and body strings in both adapters.
+- Approve-path permission records (the urgent button records emitted while
+  the approve toggle is on) carry the same session context: titles read
+  "[zcode] project - waiting for your input" and "[claude] project - waiting
+  for your input", bodies lead "session <last 6 of the id>, permission:
+  <tool>" and keep the phone action guidance and the summarized tool input,
+  reusing the shared core payload helpers. When the caller passes no cwd or
+  tool the record degrades exactly as the hook records do ("unknown"
+  project, "tool use"). The same `[toggles] context_titles = false` switch
+  restores their exact previous strings too.
 
 ### Fixed
 

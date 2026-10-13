@@ -24,7 +24,7 @@ import os
 import time
 import uuid
 
-from tugline.core import spool
+from tugline.core import payload, spool
 
 DEFAULT_WAIT = 120.0
 HARD_CAP = 300.0
@@ -146,16 +146,43 @@ def run(
     nonce=None,
     sleep=None,
     clock=None,
+    cwd=None,
+    tool_name=None,
 ):
     """Publish the approval request and bounded-wait for the decision.
 
     Returns "allow", "deny", or "ask", or None on timeout and on any
     failure to publish (the timeout-noop path: fail closed).
+
+    The record carries session context through the shared payload
+    helpers (same format as the hook records) unless
+    [toggles] context_titles is off, which restores the exact legacy
+    strings. cwd and tool_name are optional: when the caller passes
+    neither, the title degrades to the "unknown" project and the tool
+    to "tool use", exactly as the hook does for a payload without
+    those fields. The phone guidance always stays in the body: it is
+    the action instruction for the buttons.
     """
     sleeper = sleep if sleep is not None else globals()["sleep"]
     now = clock if clock is not None else globals()["monotonic"]
     token = nonce if nonce is not None else new_nonce()
     short = str(session_id)[:8]
+
+    if config.toggles.context_titles:
+        title = payload.context_title(
+            "zcode", cwd, "waiting for your input"
+        )
+        body = payload.context_body(
+            session_id,
+            "permission: %s, approve or deny from the phone"
+            % str(tool_name or "tool use"),
+        )
+    else:
+        title = "permission request"
+        body = (
+            "session %s asks permission, approve or deny from the phone"
+            % short
+        )
 
     try:
         register_pending(approvals_root, token)
@@ -165,9 +192,8 @@ def run(
             session_id=str(session_id),
             topic="warn",
             priority="urgent",
-            title="permission request",
-            body="session %s asks permission, approve or deny from the phone"
-            % short,
+            title=title,
+            body=body,
             actions=request_actions(config, token),
         )
     except OSError:
