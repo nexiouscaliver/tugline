@@ -279,3 +279,60 @@ def test_serve_holds_one_stream_per_flush_cycle(fake_ntfy, tmp_path):
     assert len(gets) == 2  # one held stream per completed cycle
     assert all("poll=1" not in r["path"] for r in gets)
     assert fake_ntfy.rate_limited == 0
+
+
+# cursor bootstrap: replies published before the first capture
+
+# The live bug: with no cursor file yet, every request used
+# since=<int(now)>, so a reply landed only when a request started in
+# the same integer second (5 of 5 pre-cursor test replies missed on
+# the operator machine). A fresh daemon must bootstrap from since=all
+# and record the first seen id.
+
+
+def test_first_stream_bootstraps_from_since_all(fake_ntfy, tmp_path):
+    fake_ntfy.queue_reply("early", msg_id="r0", t=int(time.time()) - 3600)
+    daemon = make_daemon(fake_ntfy, tmp_path)  # no cursor file yet
+
+    assert daemon.stream_replies() == 1
+
+    first_path = fake_ntfy.gets()[0]["path"]
+    assert "since=all" in first_path
+
+
+def test_precursor_replies_captured_on_first_stream_open(fake_ntfy, tmp_path):
+    for i in range(3):
+        fake_ntfy.queue_reply(
+            "pre%d" % i, msg_id="p%d" % i, t=int(time.time()) - 60
+        )
+    daemon = make_daemon(fake_ntfy, tmp_path)
+
+    assert daemon.stream_replies() == 3
+
+    entries = read_replies(tmp_path)
+    assert [e["id"] for e in entries] == ["p0", "p1", "p2"]
+    with open(tmp_path / "state" / "reply_cursor.json", encoding="utf-8") as fh:
+        assert json.load(fh) == {"last_id": "p2"}
+
+
+def test_since_all_refused_falls_back_to_a_one_hour_window(fake_ntfy, tmp_path):
+    fake_ntfy.reject_since_all = 1  # one 413 for since=all, then behave
+    fake_ntfy.queue_reply("recent", msg_id="r1", t=int(time.time()))
+    daemon = make_daemon(fake_ntfy, tmp_path)
+
+    assert daemon.stream_replies() == 1
+
+    paths = [r["path"] for r in fake_ntfy.gets()]
+    assert "since=all" in paths[0]
+    fallback_since = paths[1].split("since=")[1]
+    expected = int(time.time()) - 3600
+    assert abs(int(fallback_since) - expected) <= 2
+    assert [e["id"] for e in read_replies(tmp_path)] == ["r1"]
+
+
+def test_first_poll_bootstraps_from_since_all_too(fake_ntfy, tmp_path):
+    daemon = make_daemon(fake_ntfy, tmp_path)
+
+    daemon.poll_replies()
+
+    assert "since=all" in fake_ntfy.gets()[0]["path"]
