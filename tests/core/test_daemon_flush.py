@@ -229,7 +229,7 @@ def test_suppressed_records_are_marked_once_and_never_republished(
 ):
     """Fix contract: a policy suppression is final for that record.
     With flush now running every few seconds, suppressed records must
-    not be re-evaluated (and could never be re-published) forever —
+    not be re-evaluated (and could never be re-published) forever:
     one pass decides, marks in the sidecar, and every later pass skips
     them: stale records never re-publish after a policy decision."""
     daemon = make_daemon(fake_ntfy, tmp_path)
