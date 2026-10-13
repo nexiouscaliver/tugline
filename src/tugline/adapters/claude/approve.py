@@ -25,7 +25,7 @@ import os
 import time
 import uuid
 
-from tugline.core import approval_files, spool
+from tugline.core import spool
 
 DEFAULT_TIMEOUT = 120.0
 MAX_TIMEOUT = 300.0
@@ -92,22 +92,26 @@ def register_pending(state_root, approve_id):
     """Record the nonce so the receiver can tell known from unknown.
 
     Written before the spool record exists, so a button press can
-    never beat the registration to the receiver. The write itself is
-    core.approval_files, shared with the receiver and the console.
+    never beat the registration to the receiver.
     """
-    approval_files.register_pending(
-        os.path.join(str(state_root), APPROVALS_DIRNAME), approve_id
-    )
+    path = pending_path(state_root, approve_id)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        fh.write(json.dumps({"ts": time.time()}) + "\n")
+    os.replace(tmp, path)
 
 
 def read_decision(state_root, approve_id):
     """Return a normalized decision dict, or None when there is no answer yet."""
-    data = approval_files.read_decision(
-        os.path.join(str(state_root), APPROVALS_DIRNAME), approve_id
-    )
-    if data is None:
+    try:
+        with open(decision_path(state_root, approve_id), encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
         return None
-    value = data["decision"].strip().lower()
+    if not isinstance(data, dict):
+        return None
+    value = str(data.get("decision") or "").strip().lower()
     if value == "allow":
         return {"decision": "allow"}
     if value == "deny":
