@@ -142,3 +142,23 @@ def test_token_file_bare_line_still_works(fake_ntfy, tmp_path):
     pub.publish("tug", "x")
     header = fake_ntfy.posts("/tug")[0]["headers"].get("authorization")
     assert header == "Bearer tk_plain999"
+
+
+def test_publish_actions_header_encodes_headers_as_pairs(fake_ntfy, token_file):
+    pub = make_publisher(fake_ntfy, token_file)
+    pub.publish(
+        "tug",
+        "x",
+        actions=[
+            {
+                "action": "http",
+                "label": "Approve",
+                "url": "http://127.0.0.1:2587/approvals/n1?decision=allow",
+                "method": "POST",
+                "headers": {"Authorization": "Bearer tk_pair_test"},
+            }
+        ],
+    )
+    header = fake_ntfy.posts("/tug")[0]["headers"].get("x-actions")
+    assert "headers.Authorization=Bearer tk_pair_test" in header
+    assert "method=POST" in header

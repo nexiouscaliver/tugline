@@ -236,3 +236,69 @@ def test_load_config_via_mini_parser_when_tomllib_absent(home, monkeypatch):
     conf = cfg.load_config()
     assert conf.server.url == "http://10.0.0.5:2586"
     assert conf.toggles.approve is True
+
+
+# approve receiver and external button base
+
+
+def test_approve_port_and_external_url_defaults(home):
+    conf = cfg.load_config()
+    assert conf.server.approve_port == 2587
+    assert conf.server.external_url == ""
+
+
+def test_approve_port_loaded_from_config(home):
+    write_config(
+        home / ".tugline" / "config.toml",
+        CUSTOM.replace('token_file = "~/.tugline/my-creds"',
+                       'token_file = "~/.tugline/my-creds"\napprove_port = 2599'),
+    )
+    conf = cfg.load_config()
+    assert conf.server.approve_port == 2599
+
+
+def test_approve_port_out_of_range_rejected(home):
+    write_config(
+        home / ".tugline" / "config.toml",
+        CUSTOM.replace('token_file = "~/.tugline/my-creds"',
+                       'token_file = "~/.tugline/my-creds"\napprove_port = 70000'),
+    )
+    with pytest.raises(cfg.ConfigError) as exc:
+        cfg.load_config()
+    assert "approve_port" in str(exc.value)
+
+
+def test_approve_port_wrong_type_rejected(home):
+    write_config(
+        home / ".tugline" / "config.toml",
+        CUSTOM.replace('token_file = "~/.tugline/my-creds"',
+                       'token_file = "~/.tugline/my-creds"\napprove_port = "x"'),
+    )
+    with pytest.raises(cfg.ConfigError) as exc:
+        cfg.load_config()
+    assert "[server] approve_port" in str(exc.value)
+
+
+def test_external_url_loaded_when_http(home):
+    write_config(
+        home / ".tugline" / "config.toml",
+        CUSTOM.replace(
+            'token_file = "~/.tugline/my-creds"',
+            'token_file = "~/.tugline/my-creds"\nexternal_url = "https://tail.example.com"',
+        ),
+    )
+    conf = cfg.load_config()
+    assert conf.server.external_url == "https://tail.example.com"
+
+
+def test_external_url_must_be_http_or_empty(home):
+    write_config(
+        home / ".tugline" / "config.toml",
+        CUSTOM.replace(
+            'token_file = "~/.tugline/my-creds"',
+            'token_file = "~/.tugline/my-creds"\nexternal_url = "ftp://tail.example.com"',
+        ),
+    )
+    with pytest.raises(cfg.ConfigError) as exc:
+        cfg.load_config()
+    assert "external_url" in str(exc.value)

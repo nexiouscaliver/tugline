@@ -250,3 +250,87 @@ def test_uninstall_writes_its_own_backup_of_the_installed_state(settings_path):
     assert result["backup"].endswith("settings.json.tugline-20261013T060606")
     with open(result["backup"], encoding="utf-8") as fh:
         assert fh.read() == installed_text
+
+
+# button url formation with and without external_url
+
+
+def make_config_ext(external_url="", url="http://127.0.0.1:2586", token_file="/dev/null"):
+    from tugline.core.config import ServerConfig
+
+    return Config(
+        server=ServerConfig(
+            url=url, token_file=token_file, external_url=external_url
+        ),
+        topics=TopicsConfig(main="tug", warn="tug-warn", reply="tug-reply"),
+        policy=PolicyConfig(idle_seconds=600),
+        toggles=TogglesConfig(notify=True, replies=True, approve=True),
+        path="memory",
+    )
+
+
+def test_button_urls_use_external_url_when_set(tug_home):
+    clock = FakeClock()
+    decide_file(tug_home, "ext1", {"decision": "allow"})
+    request(
+        {"tool_name": "Bash"},
+        make_config_ext(external_url="https://tail.example.com"),
+        tug_home,
+        clock,
+        approve_id="ext1",
+    )
+    record = spooled(tug_home)[0]
+    assert record["actions"][0]["url"] == (
+        "https://tail.example.com/approvals/ext1?decision=allow"
+    )
+    assert record["actions"][1]["url"] == (
+        "https://tail.example.com/approvals/ext1?decision=deny"
+    )
+
+
+def test_button_urls_keep_the_server_base_when_external_url_empty(tug_home):
+    clock = FakeClock()
+    decide_file(tug_home, "ext2", {"decision": "allow"})
+    request(
+        {"tool_name": "Bash"},
+        make_config_ext(external_url=""),
+        tug_home,
+        clock,
+        approve_id="ext2",
+    )
+    record = spooled(tug_home)[0]
+    assert record["actions"][0]["url"] == (
+        "http://127.0.0.1:2586/approvals/ext2?decision=allow"
+    )
+
+
+def test_buttons_carry_the_bearer_token_header(tug_home, tmp_path):
+    creds = tmp_path / "creds"
+    creds.write_text("tk_button_test\n", encoding="utf-8")
+    clock = FakeClock()
+    decide_file(tug_home, "ext3", {"decision": "allow"})
+    request(
+        {"tool_name": "Bash"},
+        make_config_ext(token_file=str(creds)),
+        tug_home,
+        clock,
+        approve_id="ext3",
+    )
+    record = spooled(tug_home)[0]
+    for action in record["actions"]:
+        assert action["headers"] == {"Authorization": "Bearer tk_button_test"}
+
+
+def test_buttons_have_no_header_key_without_a_token(tug_home):
+    clock = FakeClock()
+    decide_file(tug_home, "ext4", {"decision": "allow"})
+    request(
+        {"tool_name": "Bash"},
+        make_config_ext(token_file="/nonexistent/token-file"),
+        tug_home,
+        clock,
+        approve_id="ext4",
+    )
+    record = spooled(tug_home)[0]
+    for action in record["actions"]:
+        assert "headers" not in action

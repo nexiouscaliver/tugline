@@ -206,12 +206,13 @@ def test_record_is_urgent_warn_with_button_actions(
     actions = rec["actions"]
     assert [a["label"] for a in actions] == ["Approve", "Deny"]
     assert actions[0]["url"] == (
-        "http://127.0.0.1:2586/approve?session=s-1&nonce=n-look"
+        "http://127.0.0.1:2586/approvals/n-look?decision=allow"
     )
     assert actions[1]["url"] == (
-        "http://127.0.0.1:2586/deny?session=s-1&nonce=n-look"
+        "http://127.0.0.1:2586/approvals/n-look?decision=deny"
     )
     assert all(a["action"] == "http" for a in actions)
+    assert all(a["method"] == "POST" for a in actions)
 
 
 def test_nonce_differs_between_runs(config_on, tmp_path, approvals):
@@ -224,8 +225,69 @@ def test_nonce_differs_between_runs(config_on, tmp_path, approvals):
             wait=0,
         )
     recs = records_for(tmp_path)
-    nonces = {r["actions"][0]["url"].split("nonce=")[1] for r in recs}
+    nonces = {
+        r["actions"][0]["url"].split("/approvals/")[1].split("?")[0]
+        for r in recs
+    }
     assert len(nonces) == 2
+
+
+# button url formation with and without external_url
+
+
+def config_with(tmp_path, extra_server_lines, approve=True):
+    from tugline.core.config import load_config
+
+    text = CONFIG_APPROVE_OFF.replace(
+        'token_file = "~/.tugline/credentials"',
+        'token_file = "~/.tugline/credentials"\n' + extra_server_lines,
+    )
+    if approve:
+        text = text.replace("approve = false", "approve = true")
+    path = tmp_path / "config-ext.toml"
+    path.write_text(text, encoding="utf-8")
+    return load_config(str(path))
+
+
+def test_button_urls_use_external_url_when_set(tmp_path, approvals):
+    config = config_with(
+        tmp_path, 'external_url = "https://tail.example.com"'
+    )
+    approve.run(
+        "s-1",
+        config=config,
+        spool_root=str(tmp_path / "spool"),
+        approvals_root=approvals,
+        wait=0,
+        nonce="z-ext",
+    )
+    rec = records_for(tmp_path)[0]
+    assert rec["actions"][0]["url"] == (
+        "https://tail.example.com/approvals/z-ext?decision=allow"
+    )
+    assert rec["actions"][1]["url"] == (
+        "https://tail.example.com/approvals/z-ext?decision=deny"
+    )
+
+
+def test_buttons_carry_the_bearer_token_header(tmp_path, approvals):
+    creds = tmp_path / "creds"
+    creds.write_text("tk_zcode_button\n", encoding="utf-8")
+    config = config_with(
+        tmp_path,
+        'token_file = "%s"' % creds,
+    )
+    approve.run(
+        "s-1",
+        config=config,
+        spool_root=str(tmp_path / "spool"),
+        approvals_root=approvals,
+        wait=0,
+        nonce="z-tok",
+    )
+    rec = records_for(tmp_path)[0]
+    for action in rec["actions"]:
+        assert action["headers"] == {"Authorization": "Bearer tk_zcode_button"}
 
 
 def test_garbage_decision_file_ignored_until_timeout(
