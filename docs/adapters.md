@@ -163,23 +163,43 @@ owns the rules:
 What the toggle does when on, per adapter, on a PermissionRequest:
 
 - zcode: the hook spools one urgent record on the warn topic carrying
-  Approve and Deny http action buttons targeting
-  `<server url>/approve?session=<id>&nonce=<n>` and the matching `/deny`.
-  It then polls `~/.tugline/state/approvals/<nonce>.json` every 0.5 s for a
-  decision. Default wait 120 s, hard cap 300 s, overridable with the
-  `TUGLINE_ZCODE_APPROVE_TIMEOUT` environment variable (clamped to the
-  cap). The installed hook timeout is 310 s, sized to the cap plus margin.
-- Claude Code: same shape, buttons POST to
-  `<server url>/approvals/<id>?decision=allow` or `decision=deny`, default
-  wait 120 s, hard cap 300 s. The pasted hook timeout is 320 s.
+  Approve and Deny http action buttons that POST to
+  `{button base}/approvals/{nonce}?decision=allow` and the matching
+  `decision=deny`. It then polls `~/.tugline/state/approvals/<nonce>.json`
+  every 0.5 s for a decision. Default wait 120 s, hard cap 300 s,
+  overridable with the `TUGLINE_ZCODE_APPROVE_TIMEOUT` environment
+  variable (clamped to the cap). The installed hook timeout is 310 s,
+  sized to the cap plus margin.
+- Claude Code: the same buttons and the same endpoints, default wait
+  120 s, hard cap 300 s. The pasted hook timeout is 320 s.
+
+The buttons land on the approve receiver. Whenever the toggle is on, the
+daemon serves plain HTTP on `127.0.0.1:2587` (the `[server] approve_port`
+setting) and answers `POST /approvals/{nonce}?decision=allow|deny`. The
+press carries the same bearer token as every other tugline request (the
+buttons include it in their headers), names a nonce the hook registered
+when it spooled the request, and the receiver writes the decision file
+the hook is polling for. A bad token gets 403, an unknown nonce gets
+404, and a repeated press never flips a recorded decision.
+
+The receiver binds loopback only, so a press made on the machine works
+as-is, but a phone press has to reach it through a host that forwards
+`/approvals` to this machine:
+
+- Set `[server] external_url` to a base URL that routes back (for
+  example `https://your-host.example.net`); the buttons then use
+  `{external_url}/approvals/{nonce}?decision=...` instead of the ntfy
+  base. With Tailscale, a `tailscale serve` block proxying `/approvals`
+  to `127.0.0.1:2587` on this machine does it; any small reverse proxy
+  or tunnel (caddy, nginx, cloudflared) works the same way. The token
+  already rides in the button header, so the proxy needs nothing but
+  TLS; do not add a second auth layer in front.
+- With `external_url` empty the buttons keep pointing at `[server] url`
+  (the ntfy base), which works when that base is itself fronted by a
+  proxy that also routes `/approvals` to this machine's receiver port.
 
 Fail closed, in every failure mode: on timeout, on a missing or broken
 spool, on any error, the hook prints nothing and exits 0, and the harness
-falls back to its own local permission prompt. Nothing in this code path
-ever auto-allows.
-
-Honest status for 0.1.0: the receiving side, the thing that answers those
-button URLs and writes the decision files, is not in this repository yet.
-With the toggle on today you get the urgent button-bearing notification and
-a bounded wait that ends in the local prompt. Leave the toggle off until
-that side ships; that is why it ships off.
+falls back to its own local permission prompt. A press that cannot reach
+the receiver just means the local prompt decides. Nothing in this code
+path ever auto-allows.

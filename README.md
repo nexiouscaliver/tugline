@@ -7,10 +7,12 @@ Push notifications and phone replies for coding-agent sessions, over ntfy.
 - Tells you when an agent session finishes a turn, goes idle, or blocks on a
   permission prompt.
 - Takes replies from your phone: whatever you send to the reply topic is
-  polled into a local inbox file, ready for the next prompt.
+  streamed into a local inbox file, ready for the next prompt.
 - Can put Approve and Deny buttons on permission notifications. This is the
-  approve toggle, off by default; see [docs/adapters.md](docs/adapters.md)
-  for exactly what is wired in 0.1.0.
+  approve toggle, off by default; the daemon answers the presses on a
+  loopback receiver. See [docs/adapters.md](docs/adapters.md) for the
+  receiver port, the external_url setting, and how to expose it to your
+  phone safely.
 
 The phone client is the stock ntfy app. tugline ships no app of its own and
 runs no hosted service: messages travel from your machine to an ntfy server
@@ -59,7 +61,7 @@ The short version, against a server you already run:
 ```
 tug test                      # one message, prints the HTTP code
 tug install zcode             # wire zcode hooks (see adapters doc)
-tug daemon                    # flush the spool, poll for replies
+tug daemon                    # flush the spool, stream replies
 TUGLINE_SESSION=demo tug arm  # the next Stop for demo notifies
 tug status                    # spool depth and the last phone reply
 ```
@@ -90,7 +92,7 @@ come back the same way, into a local file.
                                                               |
                     tug-reply topic     <----------------  you reply
                         |
-                    reply poll (long poll)
+                        reply stream (held subscribe)
                         |
                         v
                     ~/.tugline/replies.jsonl
@@ -130,8 +132,11 @@ brain or double buzzes. Details, the subscription matrix, and reboot notes:
 ## Privacy
 
 Messages stay on the ntfy server you configure. tugline makes exactly two
-kinds of network call, both to `[server] url`: publish a notification, and
-poll the reply topic. There is no telemetry, no account, and no hosted
+kinds of outgoing network call, both to `[server] url`: publish a
+notification, and hold the reply stream. When the approve toggle is on,
+the daemon additionally listens on `127.0.0.1` (the `approve_port`
+setting) for the button presses; it never listens on any other
+interface. There is no telemetry, no account, and no hosted
 service. One honest caveat for iOS: the stock ntfy iOS app gets instant
 delivery through the Apple Push Notification service, and a self-hosted
 server reaches APNs only if you configure it to forward through the ntfy.sh

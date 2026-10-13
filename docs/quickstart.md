@@ -89,7 +89,7 @@ tug daemon
 ```
 
 The daemon flushes the spool to ntfy (retry with exponential backoff, five
-attempts per record) and long-polls the reply topic. Leave it running in a
+attempts per record) and streams the reply topic. Leave it running in a
 terminal for now. For a single cycle, useful in scripts:
 
 ```
@@ -145,7 +145,7 @@ tug disarm <session-id>
 ## 9. Feel the reply path
 
 In the ntfy app, subscribe to the reply topic (default name `tug-reply`)
-and send a message to it. The daemon's poll picks it up within a cycle and
+and send a message to it. The daemon's stream picks it up within a cycle and
 appends one JSON line to `~/.tugline/replies.jsonl`. Check it landed:
 
 ```
