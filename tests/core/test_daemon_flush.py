@@ -266,3 +266,33 @@ def test_suppressed_records_are_marked_once_and_never_republished(
     assert fake_ntfy.posts() == []
     assert len(delivered_ids(root)) == 3  # stale id + the two records
     assert list(undelivered(root)) == []
+
+
+def test_serve_flush_cadence_stays_bounded_while_the_stream_is_held(
+    fake_ntfy, tmp_path
+):
+    """The stream-starvation receipt: while a healthy stream is held
+    open by keepalives, the serve loop still comes back to flush at
+    least every 10 seconds (daemon defaults)."""
+    fake_ntfy.stream_mode = "hold"
+    daemon = make_daemon(fake_ntfy, tmp_path)  # flush_interval=5 default
+    stamps = []
+    original = daemon.flush
+
+    def stamping():
+        stamps.append(time.monotonic())
+        if len(stamps) >= 3:
+            daemon.request_stop()
+        return original()
+
+    daemon.flush = stamping
+    keepalives = start_keepalive_pump(fake_ntfy, 0.5)
+    serve_thread = threading.Thread(target=daemon.serve, daemon=True)
+    serve_thread.start()
+    serve_thread.join(timeout=30)
+    keepalives.set()
+
+    assert not serve_thread.is_alive(), "serve never came back to flush"
+    assert len(stamps) >= 3
+    gaps = [b - a for a, b in zip(stamps, stamps[1:])]
+    assert max(gaps) <= 10.0, "flush starved behind the held stream: %r" % gaps
