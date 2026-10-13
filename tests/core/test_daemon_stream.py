@@ -184,6 +184,7 @@ def test_stream_reconnects_with_the_cursor_on_read_timeout(fake_ntfy, tmp_path):
 
     assert daemon.stream_replies() == 1  # held until the read timeout
 
+    time.sleep(0.15)  # let the stale handler reap the closed connection
     fake_ntfy.queue_reply("two", msg_id="r2", t=future())
     assert daemon.stream_replies() == 1  # reconnect picks it up
 

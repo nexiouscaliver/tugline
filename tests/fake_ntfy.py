@@ -19,6 +19,8 @@ counter. The clock is injectable so long runs can be simulated.
 """
 
 import json
+import select
+import socket
 import threading
 import time
 import urllib.parse
@@ -182,15 +184,41 @@ class _Handler(BaseHTTPRequestHandler):
         except OSError:
             return  # the client hung up (its read timeout fired)
 
+    def _client_gone(self):
+        """True when the subscriber closed its side (read timeout)."""
+        try:
+            ready, _, _ = select.select([self.connection], [], [], 0)
+        except (OSError, ValueError):
+            return True
+        if not ready:
+            return False
+        try:
+            data = self.connection.recv(1, socket.MSG_PEEK | socket.MSG_DONTWAIT)
+        except (BlockingIOError, InterruptedError):
+            return False
+        except OSError:
+            return True
+        return data == b""
+
     def _stream_lines(self, since):
         delivered = 0
         quiet_deadline = time.time() + self.server.stream_grace
         while True:
+            if self._client_gone():
+                return
             batch = self._take_replies(since)
             if batch:
-                for message in batch:
-                    self.wfile.write((json.dumps(message) + "\n").encode("utf-8"))
-                self.wfile.flush()
+                try:
+                    for message in batch:
+                        self.wfile.write((json.dumps(message) + "\n").encode("utf-8"))
+                    self.wfile.flush()
+                except OSError:
+                    # the client hung up between take and write; put the
+                    # batch back so the next connection gets it
+                    with self.server.lock:
+                        self.server.replies = batch + self.server.replies
+                        self.server.cond.notify_all()
+                    return
                 delivered += len(batch)
                 quiet_deadline = time.time() + self.server.stream_grace
                 close_after = self.server.stream_close_after
