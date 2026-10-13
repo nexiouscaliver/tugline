@@ -10,6 +10,8 @@ that log into tables a console can query in one place:
   stop, running otherwise).
 - events: every spool record, one row per record id. spool_id is
   UNIQUE, which with a SELECT check is what makes ingest idempotent.
+  Rows carry the adapter/project/cwd session fields when the record
+  has them, "" otherwise.
 - threads: one row per approval nonce parsed out of permissionrequest
   action urls, carried from open to answered or expired by the files
   under the approvals root.
@@ -88,6 +90,13 @@ MIGRATIONS = [
         );
         """,
     ),
+    (
+        2,
+        """
+        ALTER TABLE events ADD COLUMN project TEXT NOT NULL DEFAULT '';
+        ALTER TABLE events ADD COLUMN cwd TEXT NOT NULL DEFAULT '';
+        """,
+    ),
 ]
 
 
@@ -98,6 +107,11 @@ def connect(path) -> Store:
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _carried(rec, key) -> str:
+    """One enrichment field as a string; "" when the record omits it."""
+    return str(rec.get(key) or "") if key in rec else ""
 
 
 def _statements(sql):
@@ -238,7 +252,7 @@ class Store:
                     session_id = str(rec.get("session_id") or "")
                     event = str(rec.get("event") or "")
                     if session_id and self._upsert_session(
-                        session_id, event, ts
+                        session_id, event, ts, rec
                     ):
                         counts["sessions"] += 1
                     nonce = _approval_nonce(rec)
@@ -256,28 +270,40 @@ class Store:
 
     def _insert_event(self, rec, rid):
         self.conn.execute(
-            "INSERT INTO events (spool_id, ts, session_id, event, topic,"
-            " priority, title, body) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO events (spool_id, ts, session_id, adapter, event,"
+            " topic, priority, title, body, project, cwd)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 rid,
                 str(rec.get("ts") or ""),
                 str(rec.get("session_id") or ""),
+                _carried(rec, "adapter"),
                 str(rec.get("event") or ""),
                 str(rec.get("topic") or ""),
                 str(rec.get("priority") or ""),
                 str(rec.get("title") or ""),
                 str(rec.get("body") or ""),
+                _carried(rec, "project"),
+                _carried(rec, "cwd"),
             ),
         )
 
-    def _upsert_session(self, session_id, event, ts) -> bool:
+    def _upsert_session(self, session_id, event, ts, rec) -> bool:
         """Insert or widen the session row; True when it is new.
 
         The spool is walked oldest first, so the record in hand is
         usually the newest one yet; the timestamp comparisons keep the
-        result right even when it is not.
+        result right even when it is not. The enrichment fields
+        (adapter/project/cwd) are upserted last writer wins, and only
+        from records that carry them, so a plain record from the
+        approve path never wipes what an enriched hook record set.
         """
         state = _session_state(event)
+        carried = {
+            key: str(rec.get(key) or "")
+            for key in ("adapter", "project", "cwd")
+            if key in rec
+        }
         row = self.conn.execute(
             "SELECT first_seen, last_seen, last_event_ts FROM sessions"
             " WHERE session_id = ?",
@@ -285,10 +311,20 @@ class Store:
         ).fetchone()
         if row is None:
             self.conn.execute(
-                "INSERT INTO sessions (session_id, first_seen, last_seen,"
-                " state, last_event, last_event_ts)"
-                " VALUES (?, ?, ?, ?, ?, ?)",
-                (session_id, ts, ts, state, event, ts),
+                "INSERT INTO sessions (session_id, adapter, project, cwd,"
+                " first_seen, last_seen, state, last_event, last_event_ts)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    session_id,
+                    carried.get("adapter", ""),
+                    carried.get("project", ""),
+                    carried.get("cwd", ""),
+                    ts,
+                    ts,
+                    state,
+                    event,
+                    ts,
+                ),
             )
             return True
         first_seen = row["first_seen"] or ts
@@ -297,18 +333,25 @@ class Store:
         last_seen = row["last_seen"] or ts
         if ts > last_seen:
             last_seen = ts
+        extra_cols = ""
+        extra_vals = []
+        for key in ("adapter", "project", "cwd"):
+            if key in carried:
+                extra_cols += ", %s = ?" % key
+                extra_vals.append(carried[key])
         if ts >= (row["last_event_ts"] or ""):
             self.conn.execute(
                 "UPDATE sessions SET first_seen = ?, last_seen = ?,"
-                " state = ?, last_event = ?, last_event_ts = ?"
-                " WHERE session_id = ?",
-                (first_seen, last_seen, state, event, ts, session_id),
+                " state = ?, last_event = ?, last_event_ts = ?" + extra_cols
+                + " WHERE session_id = ?",
+                [first_seen, last_seen, state, event, ts] + extra_vals
+                + [session_id],
             )
         else:
             self.conn.execute(
                 "UPDATE sessions SET first_seen = ?, last_seen = ?"
-                " WHERE session_id = ?",
-                (first_seen, last_seen, session_id),
+                + extra_cols + " WHERE session_id = ?",
+                [first_seen, last_seen] + extra_vals + [session_id],
             )
         return False
 

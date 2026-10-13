@@ -4,9 +4,10 @@ Layout under the spool root (~/.tugline/spool by default):
 
 - YYYY-MM-DD.jsonl, one file per UTC day. Each line is one JSON
   record: {"id", "ts", "event", "session_id", "topic", "priority",
-  "title", "body", "actions"?, "delivered": false}. Day files are
-  append-only and never rewritten; the stored "delivered" flag stays
-  false forever and delivery state lives in delivered.json.
+  "title", "body", "actions"?, <extra fields>?, "delivered": false}.
+  Day files are append-only and never rewritten; the stored
+  "delivered" flag stays false forever and delivery state lives in
+  delivered.json.
 - delivered.json: {"ids": ["..."]} list of record ids the daemon has
   finished with (published, or consumed as state-only). Rewritten
   atomically with fsync on every mark.
@@ -41,9 +42,17 @@ def append(
     title,
     body,
     actions=None,
+    extra=None,
     now=None,
 ) -> dict:
-    """Append one record to today's file and return it."""
+    """Append one record to today's file and return it.
+
+    extra, when given, is a mapping of additional fields (session
+    enrichment like adapter/cwd/project) merged into the record after
+    the fixed fields and before the delivered flag. Values are coerced
+    with str(); records written without extra come out byte-identical
+    to the pre-extra shape. No new IO on the append path.
+    """
     root = str(root)
     when = now.astimezone(timezone.utc) if now else datetime.now(timezone.utc)
 
@@ -59,6 +68,9 @@ def append(
     }
     if actions:
         record["actions"] = actions
+    if extra:
+        for key, value in extra.items():
+            record[key] = str(value)
     record["delivered"] = False
 
     os.makedirs(root, exist_ok=True)

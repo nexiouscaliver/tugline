@@ -7,6 +7,7 @@ exactly one line in the adapter log.
 
 import io
 import json
+import os
 import time
 
 from tugline.adapters.claude import approve as approve_module
@@ -109,6 +110,54 @@ def test_notification_without_message_falls_back_to_the_title(
     assert run("Notification", payload) == 0
     record = spool_records()[0]
     assert record["body"] == "session s-4f2a, Claude needs your permission"
+
+
+# Session enrichment fields (adapter, cwd, project) on every record
+
+
+def test_record_carries_adapter_cwd_and_project(
+    tug_home, hook_payload, spool_records
+):
+    assert run("Stop", hook_payload("Stop")) == 0
+    record = spool_records()[0]
+    assert record["adapter"] == "claude"
+    assert record["cwd"] == "/Users/shahil/work/tugline"
+    assert record["project"] == "tugline"
+
+
+def test_cwd_falls_back_to_env_project_dir(
+    tug_home, monkeypatch, spool_records
+):
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/srv/env-project")
+    payload = {"session_id": "sess-env", "hook_event_name": "Stop"}
+    assert hook_module.run_event("Stop", io.StringIO(json.dumps(payload))) == 0
+    record = spool_records()[0]
+    assert record["adapter"] == "claude"
+    assert record["cwd"] == "/srv/env-project"
+    assert record["project"] == "env-project"
+
+
+def test_cwd_falls_back_to_the_process_cwd(
+    tug_home, monkeypatch, spool_records
+):
+    monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+    payload = {"session_id": "sess-cwd", "hook_event_name": "Stop"}
+    assert hook_module.run_event("Stop", io.StringIO(json.dumps(payload))) == 0
+    record = spool_records()[0]
+    assert record["cwd"] == os.getcwd()
+    assert record["project"] == os.getcwd().rstrip("/").rsplit("/", 1)[-1]
+
+
+def test_plain_permission_record_also_carries_the_fields(
+    tug_home, write_config, hook_payload, spool_records
+):
+    write_config(approve=False)
+    payload = hook_payload("PermissionRequest", tool_name="Bash")
+    assert run("PermissionRequest", payload) == 0
+    record = spool_records()[0]
+    assert record["adapter"] == "claude"
+    assert record["cwd"] == "/Users/shahil/work/tugline"
+    assert record["project"] == "tugline"
 
 
 # Payload normalization

@@ -1,12 +1,13 @@
 """Tests for the sqlite session store (tugline.core.store)."""
 
 import json
+import sqlite3
 from datetime import datetime, timedelta, timezone
 
 import pytest
 
 from tugline.core import spool
-from tugline.core.store import Store, connect
+from tugline.core.store import MIGRATIONS, Store, connect
 
 WHEN = datetime(2026, 10, 13, 12, 0, 0, tzinfo=timezone.utc)
 LATER = WHEN + timedelta(minutes=2)
@@ -51,12 +52,12 @@ def thread_for(store, nonce):
 # -- schema --
 
 
-def test_schema_version_one_and_tables_created(tmp_path):
+def test_schema_version_two_and_tables_created(tmp_path):
     store = open_store(tmp_path)
     version = store.conn.execute(
         "SELECT value FROM meta WHERE key = 'schema_version'"
     ).fetchone()[0]
-    assert version == "1"
+    assert version == "2"
     names = {
         row[0]
         for row in store.conn.execute(
@@ -64,6 +65,32 @@ def test_schema_version_one_and_tables_created(tmp_path):
         )
     }
     assert {"meta", "sessions", "events", "threads", "replies"} <= names
+    event_cols = {
+        row[1] for row in store.conn.execute("PRAGMA table_info(events)")
+    }
+    assert {"adapter", "project", "cwd"} <= event_cols
+    store.close()
+
+
+def test_version_one_store_migrates_events_columns(tmp_path):
+    path = tmp_path / "store" / "tugline.db"
+    path.parent.mkdir(parents=True)
+    conn = sqlite3.connect(path)
+    conn.executescript(MIGRATIONS[0][1])
+    conn.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT)")
+    conn.execute("INSERT INTO meta VALUES ('schema_version', '1')")
+    conn.commit()
+    conn.close()
+
+    store = Store(path)
+    version = store.conn.execute(
+        "SELECT value FROM meta WHERE key = 'schema_version'"
+    ).fetchone()[0]
+    assert version == "2"
+    event_cols = {
+        row[1] for row in store.conn.execute("PRAGMA table_info(events)")
+    }
+    assert {"project", "cwd"} <= event_cols
     store.close()
 
 
@@ -143,6 +170,96 @@ def test_reingest_returns_zeros_and_changes_nothing(tmp_path):
         "threads": 0,
     }
     assert store.events() == before
+    store.close()
+
+
+# -- session enrichment (adapter, project, cwd) --
+
+
+def test_ingest_persists_enrichment_on_events_and_sessions(tmp_path):
+    spool_root = tmp_path / "spool"
+    write(
+        spool_root,
+        now=WHEN,
+        extra={"adapter": "zcode", "cwd": "/w/alpha", "project": "alpha"},
+    )
+    store = open_store(tmp_path)
+    counts = store.ingest_spool(str(spool_root))
+    assert counts == {"events": 1, "sessions": 1, "threads": 0}
+    (event,) = store.events()
+    assert event["adapter"] == "zcode"
+    assert event["project"] == "alpha"
+    assert event["cwd"] == "/w/alpha"
+    (session,) = store.sessions()
+    assert session["adapter"] == "zcode"
+    assert session["project"] == "alpha"
+    assert session["cwd"] == "/w/alpha"
+    store.close()
+
+
+def test_session_enrichment_is_last_writer_wins(tmp_path):
+    spool_root = tmp_path / "spool"
+    write(
+        spool_root,
+        now=WHEN,
+        title="first",
+        extra={"adapter": "zcode", "cwd": "/w/alpha", "project": "alpha"},
+    )
+    write(
+        spool_root,
+        now=LATER,
+        event="stop",
+        title="second",
+        extra={"adapter": "claude", "cwd": "/w/beta", "project": "beta"},
+    )
+    store = open_store(tmp_path)
+    store.ingest_spool(str(spool_root))
+    (session,) = store.sessions()
+    assert session["adapter"] == "claude"
+    assert session["project"] == "beta"
+    assert session["cwd"] == "/w/beta"
+    by_title = {e["title"]: e for e in store.events()}
+    assert by_title["first"]["project"] == "alpha"
+    assert by_title["second"]["project"] == "beta"
+    store.close()
+
+
+def test_records_without_enrichment_keep_empty_strings(tmp_path):
+    spool_root = tmp_path / "spool"
+    write(spool_root, now=WHEN)
+    store = open_store(tmp_path)
+    store.ingest_spool(str(spool_root))
+    (event,) = store.events()
+    assert event["adapter"] == ""
+    assert event["project"] == ""
+    assert event["cwd"] == ""
+    (session,) = store.sessions()
+    assert session["adapter"] == ""
+    assert session["project"] == ""
+    assert session["cwd"] == ""
+    store.close()
+
+
+def test_unenriched_record_leaves_session_enrichment_alone(tmp_path):
+    """A later plain record (approve path) must not wipe what a hook
+    record set; only records that carry the keys upsert them."""
+    spool_root = tmp_path / "spool"
+    write(
+        spool_root,
+        now=WHEN,
+        title="enriched",
+        extra={"adapter": "zcode", "cwd": "/w/alpha", "project": "alpha"},
+    )
+    write(spool_root, now=LATER, event="stop", title="plain")
+    store = open_store(tmp_path)
+    store.ingest_spool(str(spool_root))
+    (session,) = store.sessions()
+    assert session["adapter"] == "zcode"
+    assert session["project"] == "alpha"
+    assert session["cwd"] == "/w/alpha"
+    by_title = {e["title"]: e for e in store.events()}
+    assert by_title["plain"]["adapter"] == ""
+    assert by_title["plain"]["project"] == ""
     store.close()
 
 

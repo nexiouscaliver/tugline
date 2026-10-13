@@ -119,6 +119,21 @@ def _short(session_id):
     return str(session_id)[:8]
 
 
+def _adapter_extra(normalized, env):
+    """Adapter, cwd, and project extra fields for the spool record.
+
+    cwd prefers the payload cwd field, then CLAUDE_PROJECT_DIR from
+    the environment, then the process cwd; project is the final path
+    segment of that cwd (or ""). String operations only, derived once
+    per run.
+    """
+    cwd = str(
+        normalized.get("cwd") or env.get("CLAUDE_PROJECT_DIR") or os.getcwd()
+    )
+    project = cwd.rstrip("/").rsplit("/", 1)[-1]
+    return {"adapter": "zcode", "cwd": cwd, "project": project}
+
+
 def _legacy_record_fields(event, normalized, decision, session_id):
     """The exact title and body strings from before context enrichment."""
     if event == "permissionrequest":
@@ -230,6 +245,7 @@ def _run(event_arg, stdin_text, *, home, env, config_path, out):
         log_line(home, "no event name in payload or argv")
         return 0
     session_id = _session_id(normalized, env)
+    extra = _adapter_extra(normalized, env)
 
     config = _load_config(config_path)
     if config is None:
@@ -282,6 +298,7 @@ def _run(event_arg, stdin_text, *, home, env, config_path, out):
         priority=priority,
         title=title,
         body=body,
+        extra=extra,
     )
     return 0
 
