@@ -47,7 +47,9 @@ def env(tmp_path, monkeypatch):
 def test_tug_hook_zcode_dispatches(tmp_path, monkeypatch, env):
     payload = '{"hookEventName":"Stop","sessionId":"s-cli"}'
     monkeypatch.setattr(sys, "stdin", io.StringIO(payload))
-    assert cli.main(["hook-zcode", "Stop"]) == 0
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["hook-zcode", "Stop"])
+    assert exc.value.code == 0
     records = list(spool.records(os.path.join(env, "spool")))
     assert len(records) == 1
     assert records[0]["event"] == "stop"
@@ -63,7 +65,9 @@ def test_tug_hook_zcode_without_event_arg_is_usage_error(capsys):
 def test_tug_install_zcode_dispatches(tmp_path, env):
     config = tmp_path / "zcode-config.json"
     config.write_text('{"mcp": {}}', encoding="utf-8")
-    assert cli.main(["install", "zcode", "--config", str(config)]) == 0
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["install", "zcode", "--config", str(config)])
+    assert exc.value.code == 0
     data = json.loads(config.read_text(encoding="utf-8"))
     assert set(data["hooks"]["events"]) == {
         "SessionStart",
@@ -75,8 +79,11 @@ def test_tug_install_zcode_dispatches(tmp_path, env):
 def test_tug_uninstall_zcode_dispatches(tmp_path, env):
     config = tmp_path / "zcode-config.json"
     config.write_text('{"mcp": {}}', encoding="utf-8")
-    cli.main(["install", "zcode", "--config", str(config)])
-    assert cli.main(["uninstall", "zcode", "--config", str(config)]) == 0
+    with pytest.raises(SystemExit):
+        cli.main(["install", "zcode", "--config", str(config)])
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["uninstall", "zcode", "--config", str(config)])
+    assert exc.value.code == 0
     text = config.read_text(encoding="utf-8")
     assert "tugline:zcode" not in text
 

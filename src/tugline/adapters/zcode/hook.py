@@ -42,6 +42,11 @@ def read_stdin(stream=None, ceiling=STDIN_CEILING):
     """Read stdin with a hard ceiling. Returns whatever arrived in time."""
     if stream is None:
         stream = sys.stdin
+    try:
+        stream.fileno()
+    except (OSError, ValueError, AttributeError):
+        # in-memory stream (tests, embedders): cannot block, read it all
+        return stream.read()
     chunks = []
     deadline = time.monotonic() + ceiling
     while True:
