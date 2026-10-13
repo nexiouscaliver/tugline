@@ -93,7 +93,7 @@ def test_extra_lands_after_fixed_fields_and_before_delivered(tmp_path):
 
 def test_extra_fields_round_trip_through_the_day_file(tmp_path):
     write(tmp_path, extra={"adapter": "claude", "project": "tugline"})
-    rec = records(str(tmp_path))[0]
+    rec = list(records(str(tmp_path)))[0]
     assert rec["adapter"] == "claude"
     assert rec["project"] == "tugline"
 
