@@ -153,6 +153,67 @@ def test_userpromptsubmit_records_only_never_publishes(home, config_path):
     assert rec["event"] == "userpromptsubmit"
 
 
+# Session enrichment fields (adapter, cwd, project) on every record
+
+
+def test_record_carries_adapter_cwd_and_project_from_the_payload(
+    home, config_path
+):
+    code = run_hook(
+        "Stop",
+        '{"hook_event_name":"Stop","session_id":"s-e",'
+        '"cwd":"/Users/shahil/work/tugline-console"}',
+        config_path=config_path,
+        home=home,
+    )
+    assert code == 0
+    rec = spool_records(home)[0]
+    assert rec["adapter"] == "zcode"
+    assert rec["cwd"] == "/Users/shahil/work/tugline-console"
+    assert rec["project"] == "tugline-console"
+
+
+def test_cwd_falls_back_to_env_project_dir(home, config_path):
+    code = run_hook(
+        "Stop",
+        '{"hook_event_name":"Stop","session_id":"s-env"}',
+        config_path=config_path,
+        home=home,
+        env={"CLAUDE_PROJECT_DIR": "/srv/from-env"},
+    )
+    assert code == 0
+    rec = spool_records(home)[0]
+    assert rec["adapter"] == "zcode"
+    assert rec["cwd"] == "/srv/from-env"
+    assert rec["project"] == "from-env"
+
+
+def test_cwd_falls_back_to_the_process_cwd(home, config_path):
+    code = run_hook(
+        "Stop",
+        '{"hook_event_name":"Stop","session_id":"s-cwd"}',
+        config_path=config_path,
+        home=home,
+    )
+    assert code == 0
+    rec = spool_records(home)[0]
+    assert rec["cwd"] == os.getcwd()
+    assert rec["project"] == os.getcwd().rstrip("/").rsplit("/", 1)[-1]
+
+
+def test_project_is_empty_for_a_bare_root_cwd(home, config_path):
+    code = run_hook(
+        "Stop",
+        '{"hook_event_name":"Stop","session_id":"s-root","cwd":"/"}',
+        config_path=config_path,
+        home=home,
+    )
+    assert code == 0
+    rec = spool_records(home)[0]
+    assert rec["cwd"] == "/"
+    assert rec["project"] == ""
+
+
 def test_camelcase_and_snake_payloads_agree(home, config_path):
     run_hook(
         "SessionStart",
