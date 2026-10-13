@@ -1,0 +1,137 @@
+# The console
+
+`tug console` serves one web page on 127.0.0.1 that shows everything
+tugline knows about your agent sessions: which sessions are running,
+which are waiting on you, the live event stream, the open approval
+asks, and the replies you have sent. It reads the same home directory
+the daemon and the hooks use, so there is nothing to sync and nothing
+extra to configure. The store folds the whole spool on start, so past
+sessions are on the page even when the console was not running while
+they happened.
+
+## What the page shows
+
+- Sessions: one row per session id seen in the spool, most recently
+  seen first. The state chip reads running, waiting on me (the newest
+  event is a permissionrequest), or done (the newest event is a stop).
+  The adapter and project columns fill in when hook records carry
+  them. Click the session id to filter the live stream to that
+  session and to aim the reply box at it.
+- Live stream: the newest events with time, event name, session id,
+  and title. Each notifiable row carries a delivery chip: pending
+  until the daemon handles the record, delivered after (delivered
+  means handled, published or not). userpromptsubmit and
+  sessionstart records never notify, so they show no chip rather than
+  a false pending.
+- Asks: every open approval ask with Approve and Deny buttons and a
+  reply link, plus an answered and expired list underneath. The
+  buttons write the same decision files the approve receiver reads,
+  so a press on the page and a press on a phone notification have the
+  same effect.
+- Reply: a text box with an explicit target line: reply to session
+  <id>, reply via thread <id>, or no target selected. Pick a target by
+  clicking a session row or an ask reply link; Cmd+Enter or
+  Ctrl+Enter sends. A sent reply lands in the store and is appended
+  to `~/.tugline/replies.jsonl` in the same format the daemon writes
+  for phone replies.
+- Header health: daemon running, stopped, or unknown; ntfy ok or
+  unreachable; how many spool records are pending; how long since the
+  last ingest; and a live or reconnecting chip for the event stream
+  connection.
+
+The page is one HTML file, one stylesheet, and one script, served
+from the console itself: no external assets, no CDN, no JavaScript
+libraries. It renders at 390px (a phone) and 1440px (a desktop).
+
+## Running it
+
+```
+tug console
+```
+
+Example output:
+
+```
+tug console listening on http://127.0.0.1:2588/
+http://127.0.0.1:2588/
+```
+
+SIGINT or SIGTERM stops it. `--open` opens the page in your default
+browser, and `--port` overrides the configured port for one run.
+
+The switch and the port live in `~/.tugline/config.toml`:
+
+```toml
+[toggles]
+console = true
+
+[server]
+console_port = 2588
+```
+
+The toggle defaults to on. With `console = false`, `tug console`
+prints one line:
+
+```
+console is off in config, nothing to serve
+```
+
+and exits 0; nothing listens. `console_port = 0` binds a free port and
+the startup line names it, which is also what `--port 0` does.
+
+For an isolated home (a demo, a second instance, a test):
+
+```
+TUGLINE_HOME=~/tmp/tugline-demo tug console
+```
+
+TUGLINE_HOME moves the whole tree: spool, state, store, and replies
+all land under that root, leaving `~/.tugline` alone.
+
+## The API
+
+Everything the page uses is plain HTTP on the same port, so you can
+drive it with curl. GETs are the reads; POSTs are the writes.
+
+| Method and path | What it does |
+| --- | --- |
+| GET `/` | the console page |
+| GET `/api/state` | one render in one read: sessions, the last 50 events, threads, the last 20 replies, headline counts, health, spool depth, last ingest time |
+| GET `/api/sessions` | all sessions, most recently seen first |
+| GET `/api/events?limit=50&session=<id>` | events newest first, optionally scoped to one session; a non-integer limit is a 400 |
+| GET `/api/threads?status=open` | approval threads, newest first, optionally one status |
+| GET `/api/replies?limit=50` | replies, newest first; a non-integer limit is a 400 |
+| GET `/api/events/stream` | server-sent events: one `snapshot` on connect, then a `delta` after each ingest pass (about every 2 seconds), a `: ping` keepalive when 15 seconds pass with nothing to send |
+| POST `/api/replies` | body must be a JSON object with a string `body` and exactly one target, `thread_nonce` or `session_id`, or 400; an unknown thread nonce is a 404; records the reply and appends the replies.jsonl line |
+| POST `/api/approvals/<nonce>?decision=allow` | `decision` must be `allow` or `deny` or 400; an unknown nonce is a 404; an already answered nonce returns 200 with `status: already answered` and never flips the recorded decision |
+
+Event queries are ordered by timestamp, not insertion: spool records
+can arrive out of order, and the store sorts them so the stream reads
+chronologically.
+
+## Security
+
+- The console binds 127.0.0.1 only. Nothing listens on any other
+  interface, on any port.
+- POST endpoints carry the same bearer posture as the approve
+  receiver: when the configured token file exists and holds a token,
+  a POST without `Authorization: Bearer <token>` gets a 403. With no
+  token on file (the default), POSTs are open to whatever can already
+  reach loopback.
+- One consequence worth knowing: the page itself sends no
+  Authorization header. With a token configured the page still
+  renders, but its reply and approve buttons fail with 403; use curl
+  with the header for writes in that setup.
+- The token is never rendered. No API response and no page element
+  includes the token or the token file contents.
+
+## From a phone over a tailnet
+
+Loopback means the page is local to the machine serving it. If that
+machine and your phone share a tailnet, port-based forwarding works:
+one `tailscale serve` rule pointing at the console port gives the page
+an HTTPS name your phone can open. Path-based serve rules are not
+available on every client, so prefer the port form. This is a
+suggestion, not a setup tugline manages; think through what you expose
+the same way you would for the approve receiver (see
+[docs/adapters.md](adapters.md)).

@@ -14,6 +14,11 @@ Push notifications and phone replies for coding-agent sessions, over ntfy.
   receiver port, the external_url setting, and how to expose it to your
   phone safely.
 
+The local console is the at-a-glance side of the same machine: one web
+page of sessions and their states, the live event stream, open approval
+asks with Approve and Deny, and a reply box. `tug console` serves it on
+loopback. See [docs/console.md](docs/console.md).
+
 The phone client is the stock ntfy app. tugline ships no app of its own and
 runs no hosted service: messages travel from your machine to an ntfy server
 you point at, and that is the whole path.
