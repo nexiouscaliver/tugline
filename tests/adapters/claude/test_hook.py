@@ -7,6 +7,7 @@ exactly one line in the adapter log.
 
 import io
 import json
+import time
 
 from tugline.adapters.claude import approve as approve_module
 from tugline.adapters.claude import hook as hook_module
@@ -228,3 +229,17 @@ def test_permission_request_with_broken_config_spools_a_plain_record(
     records = spool_records()
     assert len(records) == 1
     assert "actions" not in records[0]
+
+
+def test_read_stdin_gives_up_at_the_ceiling_on_a_silent_pipe():
+    import os
+
+    read_fd, write_fd = os.pipe()
+    try:
+        stream = os.fdopen(read_fd, "r")
+        start = time.perf_counter()
+        assert hook_module.read_stdin(stream, timeout=0.2) == ""
+        elapsed = time.perf_counter() - start
+        assert 0.15 <= elapsed < 2.0
+    finally:
+        os.close(write_fd)

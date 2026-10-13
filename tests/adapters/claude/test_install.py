@@ -186,3 +186,13 @@ def test_permission_request_entry_carries_a_longer_timeout(settings_path):
     stop = data["hooks"]["Stop"][1]["hooks"][0]
     assert permission["timeout"] == 320
     assert stop["timeout"] == 20
+
+
+def test_install_command_override_lands_in_every_entry(tmp_path):
+    path = tmp_path / "settings.json"
+    path.write_text("{}", encoding="utf-8")
+    install_module.install(path, command="/opt/venv/bin/tug")
+    data = json.loads(read(path))
+    for event in WIRED_EVENTS:
+        command = data["hooks"][event][0]["hooks"][0]["command"]
+        assert command.startswith("/opt/venv/bin/tug hook-claude %s" % event)

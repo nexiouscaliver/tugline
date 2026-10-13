@@ -226,3 +226,27 @@ def test_tool_input_summary_is_compact_and_bounded(tug_home):
     record = spooled(tug_home)[0]
     assert record["body"].startswith("Bash ")
     assert len(record["body"]) <= 205
+
+
+def test_wait_stops_at_the_300s_hard_cap_in_the_loop(tug_home):
+    clock = FakeClock()
+    result = request(
+        {"tool_name": "Bash"}, make_config(), tug_home, clock, timeout=999.0, approve_id="none3"
+    )
+    assert result is None
+    assert clock.now <= 1000.0 + 300.0 + approve_module.POLL_INTERVAL
+
+
+def test_uninstall_writes_its_own_backup_of_the_installed_state(settings_path):
+    from datetime import datetime
+
+    from tugline.adapters.claude import install as install_module
+    from tugline.adapters.claude import uninstall as uninstall_module
+
+    install_module.install(settings_path)
+    installed_text = settings_path.read_text(encoding="utf-8")
+    stamp = datetime(2026, 10, 13, 6, 6, 6)
+    result = uninstall_module.uninstall(settings_path, now=stamp)
+    assert result["backup"].endswith("settings.json.tugline-20261013T060606")
+    with open(result["backup"], encoding="utf-8") as fh:
+        assert fh.read() == installed_text
