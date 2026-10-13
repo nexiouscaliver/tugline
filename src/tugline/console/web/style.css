@@ -1,0 +1,590 @@
+/* tugline console styles.
+   Four semantic colors only (green, amber, red, gray) plus one accent
+   used for selection. Near-black surfaces, 1px borders, radius 2px,
+   no gradients, no icons, no shadows. */
+
+:root {
+  --bg: #0e1116;
+  --panel: #131820;
+  --row-line: #1e242e;
+  --border: #2a2f3a;
+  --text: #c7d0d9;
+  --muted: #77828e;
+  --green: #3fb950;
+  --amber: #d29922;
+  --red: #f85149;
+  --gray: #8b949e;
+  --accent: #58a6ff;
+  --mono: ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas,
+    "Liberation Mono", monospace;
+  --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+}
+
+* { box-sizing: border-box; }
+
+html { font-size: 13px; }
+
+@media (max-width: 719px) {
+  html { font-size: 15px; }
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: 1rem;
+  line-height: 1.45;
+}
+
+/* -- header -- */
+
+.top {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem 1rem;
+  padding: 0.7rem 0.8rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.wordmark {
+  font-family: var(--mono);
+  font-size: 1.1rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
+.statusbar {
+  margin-left: auto;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.3rem 1rem;
+  font-family: var(--mono);
+  font-size: 0.9rem;
+  color: var(--muted);
+}
+
+.stat {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  white-space: nowrap;
+}
+
+.stat.warn { color: var(--amber); }
+
+#fresh-stat { min-width: 11ch; text-align: right; }
+
+.dot {
+  width: 0.55rem;
+  height: 0.55rem;
+  border-radius: 2px;
+  display: inline-block;
+}
+
+.dot-green { background: var(--green); }
+.dot-amber { background: var(--amber); }
+.dot-red { background: var(--red); }
+.dot-gray { background: var(--gray); }
+
+/* -- layout -- */
+
+main {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0.7rem;
+  padding: 0.7rem 0.8rem 2rem;
+  max-width: 1380px;
+  margin: 0 auto;
+}
+
+@media (min-width: 720px) {
+  main {
+    grid-template-columns: minmax(0, 7fr) minmax(0, 5fr);
+    grid-template-areas:
+      "sessions asks"
+      "sessions reply"
+      "stream stream";
+    align-items: start;
+  }
+  #sessions-panel { grid-area: sessions; }
+  #asks-panel { grid-area: asks; }
+  #reply-panel { grid-area: reply; }
+  #stream-panel { grid-area: stream; }
+}
+
+/* phones stack the panels with the stream directly under sessions:
+   header, sessions, stream, asks, reply */
+@media (max-width: 719px) {
+  main {
+    display: flex;
+    flex-direction: column;
+    gap: 0.7rem;
+  }
+  #sessions-panel { order: 1; }
+  #stream-panel { order: 2; }
+  #asks-panel { order: 3; }
+  #reply-panel { order: 4; }
+}
+
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 2px;
+  padding: 0.7rem 0.8rem 0.8rem;
+  min-width: 0;
+}
+
+h2,
+h3 {
+  margin: 0 0 0.55rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+h3 { margin-top: 0.9rem; }
+
+/* -- shared bits -- */
+
+.chip {
+  display: inline-block;
+  font-family: var(--mono);
+  font-size: 0.8rem;
+  line-height: 1;
+  padding: 0.22rem 0.4rem;
+  border-radius: 2px;
+  border: 1px solid transparent;
+  text-align: center;
+  white-space: nowrap;
+}
+
+.chip-green { color: var(--green); border-color: rgba(63, 185, 80, 0.45); background: rgba(63, 185, 80, 0.08); }
+.chip-amber { color: var(--amber); border-color: rgba(210, 153, 34, 0.45); background: rgba(210, 153, 34, 0.08); }
+.chip-red { color: var(--red); border-color: rgba(248, 81, 73, 0.45); background: rgba(248, 81, 73, 0.08); }
+.chip-gray { color: var(--gray); border-color: rgba(139, 148, 158, 0.45); background: rgba(139, 148, 158, 0.08); }
+
+#live-chip { min-width: 11ch; }
+
+.chip-state { min-width: 14ch; }
+
+.empty {
+  margin: 0.5rem 0 0;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.error {
+  margin: 0.4rem 0 0;
+  color: var(--red);
+  font-family: var(--mono);
+  font-size: 0.85rem;
+  overflow-wrap: anywhere;
+}
+
+button { font: inherit; }
+
+:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* -- sessions table -- */
+
+.scroll { overflow-x: auto; }
+
+table {
+  border-collapse: collapse;
+  width: 100%;
+  min-width: 38rem;
+  font-size: 0.9rem;
+}
+
+th {
+  text-align: left;
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+  padding: 0.25rem 0.5rem;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+
+td {
+  padding: 0.3rem 0.5rem;
+  border-bottom: 1px solid var(--row-line);
+  vertical-align: top;
+  white-space: nowrap;
+}
+
+tbody tr:last-child td { border-bottom: none; }
+
+tr.selected td { background: rgba(88, 166, 255, 0.09); }
+
+.idlink {
+  font-family: var(--mono);
+  font-size: 0.9rem;
+  color: var(--text);
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+}
+
+.idlink:hover {
+  color: var(--accent);
+  text-decoration: underline;
+}
+
+tr.selected .idlink { color: var(--accent); }
+
+.cell-badge { font-family: var(--mono); min-width: 6ch; color: var(--muted); }
+
+.cell-project,
+.cell-event {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 18rem;
+}
+
+.cell-time {
+  font-family: var(--mono);
+  color: var(--muted);
+  min-width: 6ch;
+  text-align: right;
+}
+
+/* adapter and project stay empty until field enrichment lands, so
+   those columns render only when some session in the current data
+   carries a value; paintSessions toggles these classes per repaint */
+#sessions-table.no-adapter .col-adapter,
+#sessions-table.no-adapter td.cell-badge { display: none; }
+
+#sessions-table.no-project .col-project,
+#sessions-table.no-project td.cell-project { display: none; }
+
+/* phones: session rows restyle as stacked two-line rows. Line 1 is
+   the state chip, short id, adapter badge, relative time; line 2 is
+   the last event with ellipsis plus the project label. Nothing
+   scrolls sideways. */
+@media (max-width: 719px) {
+  .scroll { overflow: visible; }
+
+  #sessions-table {
+    display: block;
+    min-width: 0;
+  }
+
+  #sessions-table thead { display: none; }
+
+  #sessions-table tbody { display: block; }
+
+  #sessions-table tr {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto auto;
+    grid-template-areas:
+      "state id adapter time"
+      "event event event project";
+    column-gap: 0.55rem;
+    row-gap: 0.2rem;
+    align-items: center;
+    padding: 0.45rem 0;
+    border-bottom: 1px solid var(--row-line);
+  }
+
+  #sessions-table tr.selected { background: rgba(88, 166, 255, 0.09); }
+
+  #sessions-table td {
+    display: block;
+    min-width: 0;
+    padding: 0;
+    border: none;
+  }
+
+  #sessions-table tr.selected td { background: none; }
+
+  #sessions-table td.cell-state { grid-area: state; }
+  #sessions-table td.cell-id { grid-area: id; }
+  #sessions-table td.cell-badge {
+    grid-area: adapter;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  #sessions-table td.cell-time { grid-area: time; justify-self: end; }
+
+  #sessions-table td.cell-event {
+    grid-area: event;
+    max-width: none;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  #sessions-table td.cell-project {
+    grid-area: project;
+    justify-self: end;
+    max-width: 40%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+}
+
+/* -- live stream -- */
+
+.stream {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  min-width: 36rem;
+  font-size: 0.9rem;
+}
+
+.stream li {
+  display: grid;
+  grid-template-columns: 8ch 14ch 9ch minmax(0, 1fr) 10ch;
+  gap: 0.7rem;
+  align-items: baseline;
+  padding: 0.2rem 0;
+  border-bottom: 1px solid var(--row-line);
+}
+
+.stream li:last-child { border-bottom: none; }
+
+.stream .t,
+.stream .sid {
+  font-family: var(--mono);
+  color: var(--muted);
+}
+
+.stream .ev {
+  font-family: var(--mono);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.stream .tx {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.stream .chip,
+.stream .nochip { justify-self: end; }
+
+/* phones: stream rows are flex rows that fit the viewport. The
+   flexible text ellipsizes instead of clipping mid-word, and the
+   delivery chip never shrinks, so it stays visible. */
+@media (max-width: 719px) {
+  .stream { min-width: 0; }
+
+  .stream li {
+    display: flex;
+    align-items: baseline;
+    gap: 0.4rem;
+    min-width: 0;
+  }
+
+  .stream .t,
+  .stream .sid { flex: none; }
+
+  .stream .ev {
+    flex: 0 1 auto;
+    min-width: 0;
+    max-width: 9ch;
+    white-space: nowrap;
+  }
+
+  .stream .tx {
+    flex: 1 1 0;
+    min-width: 0;
+  }
+
+  .stream .chip,
+  .stream .nochip { flex: none; }
+}
+
+/* -- asks -- */
+
+.asks {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.asks > li {
+  border: 1px solid var(--border);
+  border-radius: 2px;
+  padding: 0.5rem 0.6rem;
+}
+
+.asks > li.selected { border-color: var(--accent); }
+
+.ask-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.35rem 0.7rem;
+}
+
+.ask-line .sid { font-family: var(--mono); font-size: 0.9rem; }
+
+.ask-line .tx {
+  flex: 1 1 10rem;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ask-line .age {
+  font-family: var(--mono);
+  color: var(--muted);
+  min-width: 6ch;
+  text-align: right;
+}
+
+.btn {
+  font-family: var(--mono);
+  font-size: 0.85rem;
+  line-height: 1;
+  padding: 0.35rem 0.7rem;
+  border-radius: 2px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+}
+
+.btn:disabled { opacity: 0.5; cursor: default; }
+
+.btn-approve { color: var(--green); border-color: rgba(63, 185, 80, 0.5); }
+.btn-approve:hover:not(:disabled) { background: rgba(63, 185, 80, 0.12); }
+
+.btn-deny { color: var(--red); border-color: rgba(248, 81, 73, 0.5); }
+.btn-deny:hover:not(:disabled) { background: rgba(248, 81, 73, 0.12); }
+
+.linkish {
+  font-family: var(--mono);
+  font-size: 0.85rem;
+  color: var(--accent);
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+}
+
+.linkish:hover,
+.linkish.on { text-decoration: underline; }
+
+.settled { gap: 0; }
+
+.settled > li {
+  border: none;
+  border-bottom: 1px solid var(--row-line);
+  border-radius: 0;
+  padding: 0.25rem 0;
+  display: flex;
+  align-items: baseline;
+  gap: 0.7rem;
+  font-size: 0.9rem;
+}
+
+.settled > li:last-child { border-bottom: none; }
+
+.settled .out { font-family: var(--mono); min-width: 8ch; }
+.out-green { color: var(--green); }
+.out-red { color: var(--red); }
+.out-gray { color: var(--gray); }
+
+.settled .sid { font-family: var(--mono); color: var(--muted); }
+
+.settled .tx {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* -- reply box -- */
+
+.target {
+  margin: 0 0 0.5rem;
+  font-family: var(--mono);
+  font-size: 0.9rem;
+  color: var(--muted);
+}
+
+.target.active { color: var(--text); }
+
+textarea {
+  width: 100%;
+  min-height: 4.5rem;
+  resize: vertical;
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 2px;
+  font-family: var(--mono);
+  font-size: 0.9rem;
+  line-height: 1.4;
+  padding: 0.5rem 0.6rem;
+}
+
+textarea:focus {
+  border-color: var(--accent);
+  outline: none;
+}
+
+textarea:disabled { opacity: 0.45; }
+
+.reply-actions {
+  margin-top: 0.5rem;
+  display: flex;
+  gap: 0.5rem;
+}
+
+#reply-send:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.recent {
+  list-style: none;
+  margin: 0.7rem 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.recent li {
+  display: flex;
+  align-items: baseline;
+  gap: 0.7rem;
+  font-size: 0.9rem;
+}
+
+.recent .tx {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.recent .tgt {
+  font-family: var(--mono);
+  color: var(--muted);
+  white-space: nowrap;
+}

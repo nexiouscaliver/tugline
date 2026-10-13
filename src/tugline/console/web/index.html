@@ -2,24 +2,63 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>tug console</title>
-<style>
-body { background: #11151a; color: #c7d0d9; font-family: monospace; margin: 2rem; }
-h1 { font-size: 1.1rem; }
-p { color: #7f8b97; }
-pre { white-space: pre-wrap; word-break: break-word; }
-</style>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>tugline console</title>
+<link rel="stylesheet" href="style.css">
+<script type="module" src="app.js"></script>
 </head>
 <body>
-<h1>tug console</h1>
-<p>placeholder page for this wave: raw state below.</p>
-<pre id="state">loading...</pre>
-<script>
-fetch("/api/state").then(function (r) { return r.json(); }).then(function (s) {
-  document.getElementById("state").textContent = JSON.stringify(s, null, 2);
-}).catch(function (e) {
-  document.getElementById("state").textContent = "state unavailable: " + e;
-});
-</script>
+<header class="top">
+  <span class="wordmark">tugline</span>
+  <div class="statusbar" id="statusbar">
+    <span class="stat"><span class="dot dot-gray" id="daemon-dot"></span><span id="daemon-word">unknown</span></span>
+    <span class="stat"><span class="dot dot-red" id="ntfy-dot"></span><span id="ntfy-word">unreachable</span></span>
+    <span class="stat" id="spool-stat">nothing pending</span>
+    <span class="stat" id="fresh-stat">never updated</span>
+    <span class="chip chip-amber" id="live-chip">reconnecting</span>
+  </div>
+</header>
+<main>
+  <section class="panel" id="sessions-panel" aria-label="sessions">
+    <h2>sessions</h2>
+    <div class="scroll">
+      <table id="sessions-table">
+        <thead>
+          <tr><th>state</th><th>session</th><th class="col-adapter">adapter</th><th class="col-project">project</th><th>last event</th><th>seen</th></tr>
+        </thead>
+        <tbody id="sessions-body"></tbody>
+      </table>
+    </div>
+    <p class="empty" id="sessions-empty" hidden>no sessions yet; rows appear when a hook spools an event</p>
+  </section>
+
+  <section class="panel" id="asks-panel" aria-label="asks">
+    <h2>asks</h2>
+    <ul class="asks" id="asks-open"></ul>
+    <p class="empty" id="asks-empty" hidden>no open asks</p>
+    <h3 id="asks-settled-heading" hidden>answered and expired</h3>
+    <ul class="asks settled" id="asks-settled"></ul>
+  </section>
+
+  <section class="panel" id="reply-panel" aria-label="reply">
+    <h2>reply</h2>
+    <p class="target" id="reply-target">no target selected</p>
+    <textarea id="reply-body" rows="3" disabled placeholder="pick a session row or an ask reply link first"></textarea>
+    <div class="reply-actions">
+      <button type="button" id="reply-send" disabled>send</button>
+    </div>
+    <p class="error" id="reply-error" hidden></p>
+    <ul class="recent" id="recent-replies"></ul>
+    <p class="empty" id="recent-empty">no replies yet</p>
+  </section>
+
+  <section class="panel" id="stream-panel" aria-label="live stream">
+    <h2 id="stream-title">live stream</h2>
+    <div class="scroll">
+      <ol class="stream" id="stream"></ol>
+    </div>
+    <p class="empty" id="stream-empty" hidden>no events yet</p>
+  </section>
+</main>
 </body>
 </html>

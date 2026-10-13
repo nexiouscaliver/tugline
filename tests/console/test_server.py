@@ -164,7 +164,48 @@ def test_root_serves_the_html_page(bench):
     assert status == 200
     text = raw.decode()
     assert text.lstrip().startswith("<!doctype html>")
-    assert "/api/state" in text
+    assert "tugline" in text
+    assert "app.js" in text
+    assert "style.css" in text
+
+
+# -- static web assets --
+
+
+def get_with_type(bench, path):
+    req = urllib.request.Request(bench.base + path)
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        return resp.status, resp.headers.get("Content-Type", ""), resp.read()
+
+
+def test_web_assets_served_with_content_types(bench):
+    status, ctype, body = get_with_type(bench, "/style.css")
+    assert status == 200
+    assert ctype.startswith("text/css")
+    assert body
+    status, ctype, body = get_with_type(bench, "/app.js")
+    assert status == 200
+    assert ctype.startswith("text/javascript")
+    assert body
+
+
+def test_traversal_attempts_never_leave_web_dir(bench):
+    # only a single safe name ever reaches the file system; paths with
+    # dot-dot, encoded slashes, or extra segments stay on the 404 path
+    for path in (
+        "/../secret",
+        "/..%2f..%2fetc%2fpasswd",
+        "/web/../../server.py",
+    ):
+        status, data = bench.get_json(path)
+        assert status == 404, path
+        assert data["error"] == "unknown endpoint"
+
+
+def test_unknown_web_asset_is_404(bench):
+    status, data = bench.get_json("/nope.js")
+    assert status == 404
+    assert data["error"] == "unknown endpoint"
 
 
 # -- GET endpoints --
