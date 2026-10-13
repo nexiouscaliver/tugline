@@ -63,6 +63,70 @@ def test_actions_omitted_when_not_given(tmp_path):
     assert "actions" not in rec
 
 
+def test_extra_fields_merge_after_fixed_fields_before_delivered(tmp_path):
+    rec = write(
+        tmp_path,
+        extra={"adapter": "zcode", "cwd": "/w/proj", "project": "proj"},
+    )
+    assert rec["adapter"] == "zcode"
+    assert rec["cwd"] == "/w/proj"
+    assert rec["project"] == "proj"
+    assert list(rec) == [
+        "id",
+        "ts",
+        "event",
+        "session_id",
+        "topic",
+        "priority",
+        "title",
+        "body",
+        "adapter",
+        "cwd",
+        "project",
+        "delivered",
+    ]
+
+
+def test_extra_fields_carry_over_into_the_written_line(tmp_path):
+    rec = write(tmp_path, extra={"adapter": "claude"})
+    line = (tmp_path / "2026-10-13.jsonl").read_text().splitlines()[0]
+    assert json.loads(line) == rec
+    assert '"adapter":"claude"' in line
+
+
+def test_extra_values_are_coerced_to_strings(tmp_path):
+    rec = write(tmp_path, extra={"count": 42, "flag": True})
+    assert rec["count"] == "42"
+    assert rec["flag"] == "True"
+
+
+def test_empty_extra_map_writes_no_new_fields(tmp_path):
+    rec = write(tmp_path, extra={})
+    assert "adapter" not in rec
+    assert list(rec)[-1] == "delivered"
+
+
+def test_absent_extra_keeps_written_bytes_identical(tmp_path):
+    with_actions = write(
+        tmp_path,
+        title="one",
+        actions=[{"action": "view", "label": "Open"}],
+    )
+    plain = write(tmp_path, title="two")
+    lines = (tmp_path / "2026-10-13.jsonl").read_text().splitlines(
+        keepends=True
+    )
+    assert lines == [
+        '{"id":"%s","ts":"2026-10-13T12:00:00+00:00","event":"notify",'
+        '"session_id":"s1","topic":"tug","priority":"default","title":"one",'
+        '"body":"hello there","actions":[{"action":"view","label":"Open"}],'
+        '"delivered":false}\n' % with_actions["id"],
+        '{"id":"%s","ts":"2026-10-13T12:00:00+00:00","event":"notify",'
+        '"session_id":"s1","topic":"tug","priority":"default","title":"two",'
+        '"body":"hello there","delivered":false}\n' % plain["id"],
+    ]
+
+
 def test_ids_are_unique(tmp_path):
     ids = {write(tmp_path)["id"] for _ in range(10)}
     assert len(ids) == 10

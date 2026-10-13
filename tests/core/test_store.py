@@ -51,12 +51,12 @@ def thread_for(store, nonce):
 # -- schema --
 
 
-def test_schema_version_one_and_tables_created(tmp_path):
+def test_schema_version_two_and_tables_created(tmp_path):
     store = open_store(tmp_path)
     version = store.conn.execute(
         "SELECT value FROM meta WHERE key = 'schema_version'"
     ).fetchone()[0]
-    assert version == "1"
+    assert version == "2"
     names = {
         row[0]
         for row in store.conn.execute(
@@ -64,6 +64,14 @@ def test_schema_version_one_and_tables_created(tmp_path):
         )
     }
     assert {"meta", "sessions", "events", "threads", "replies"} <= names
+    event_cols = {
+        row[1] for row in store.conn.execute("PRAGMA table_info(events)")
+    }
+    assert {"adapter", "project", "cwd"} <= event_cols
+    session_cols = {
+        row[1] for row in store.conn.execute("PRAGMA table_info(sessions)")
+    }
+    assert {"adapter", "project", "cwd"} <= session_cols
     store.close()
 
 
@@ -143,6 +151,85 @@ def test_reingest_returns_zeros_and_changes_nothing(tmp_path):
         "threads": 0,
     }
     assert store.events() == before
+    store.close()
+
+
+# -- enrichment --
+
+
+def test_ingest_persists_enrichment_on_events_and_sessions(tmp_path):
+    spool_root = tmp_path / "spool"
+    write(
+        spool_root,
+        now=WHEN,
+        extra={"adapter": "zcode", "cwd": "/w/proj", "project": "proj"},
+    )
+    store = open_store(tmp_path)
+    counts = store.ingest_spool(str(spool_root))
+    assert counts == {"events": 1, "sessions": 1, "threads": 0}
+    (event,) = store.events()
+    assert event["adapter"] == "zcode"
+    assert event["project"] == "proj"
+    assert event["cwd"] == "/w/proj"
+    (session,) = store.sessions()
+    assert session["adapter"] == "zcode"
+    assert session["project"] == "proj"
+    assert session["cwd"] == "/w/proj"
+    store.close()
+
+
+def test_records_without_enrichment_keep_empty_strings(tmp_path):
+    spool_root = tmp_path / "spool"
+    write(spool_root, now=WHEN)
+    store = open_store(tmp_path)
+    store.ingest_spool(str(spool_root))
+    (event,) = store.events()
+    assert event["adapter"] == ""
+    assert event["project"] == ""
+    assert event["cwd"] == ""
+    (session,) = store.sessions()
+    assert session["adapter"] == ""
+    assert session["project"] == ""
+    assert session["cwd"] == ""
+    store.close()
+
+
+def test_session_enrichment_last_writer_wins(tmp_path):
+    spool_root = tmp_path / "spool"
+    write(
+        spool_root,
+        now=WHEN,
+        extra={"adapter": "zcode", "cwd": "/w/one", "project": "one"},
+    )
+    write(
+        spool_root,
+        now=LATER,
+        extra={"adapter": "claude", "cwd": "/w/two", "project": "two"},
+    )
+    store = open_store(tmp_path)
+    store.ingest_spool(str(spool_root))
+    (session,) = store.sessions()
+    assert session["adapter"] == "claude"
+    assert session["cwd"] == "/w/two"
+    assert session["project"] == "two"
+    store.close()
+
+
+def test_plain_record_never_clobbers_session_enrichment(tmp_path):
+    spool_root = tmp_path / "spool"
+    write(
+        spool_root,
+        now=WHEN,
+        extra={"adapter": "zcode", "cwd": "/w/one", "project": "one"},
+    )
+    write(spool_root, now=LATER, event="stop", title="plain")
+    store = open_store(tmp_path)
+    store.ingest_spool(str(spool_root))
+    (session,) = store.sessions()
+    assert session["adapter"] == "zcode"
+    assert session["cwd"] == "/w/one"
+    assert session["project"] == "one"
+    assert session["last_event"] == "stop"
     store.close()
 
 
