@@ -419,29 +419,13 @@ def test_approve_already_answered_is_200(bench, home):
 
 
 # -- auth posture --
+# Both postures live in test_auth.py: with a token on file every /api
+# request (reads, writes, and the stream) requires it as a Bearer
+# header or a ?token= query parameter; without one the console is the
+# open loopback default these tests exercise throughout.
 
 
-def test_token_gates_post_but_not_get(tmp_path, monkeypatch):
-    monkeypatch.setenv("TUGLINE_HOME", str(tmp_path))
-    monkeypatch.delenv("TUGLINE_CONFIG", raising=False)
-    (tmp_path / "credentials").write_text("sekret-token\n")
-    bench = Bench(tmp_path, token_file=tmp_path / "credentials")
-    try:
-        status, _ = bench.get_json("/api/state")
-        assert status == 200
-        status, data = bench.post_json(
-            "/api/replies", {"session_id": "s", "body": "x"}
-        )
-        assert status == 403
-        assert data["error"]
-        status, data = bench.post_json(
-            "/api/replies",
-            {"session_id": "s", "body": "x"},
-            headers={"Authorization": "Bearer sekret-token"},
-        )
-        assert status == 200
-    finally:
-        bench.stop()
+# -- SSE --
 
 
 # -- SSE --
