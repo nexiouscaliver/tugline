@@ -15,6 +15,8 @@ permissions:
 
 jobs:
   publish:
+    # PYPI_READY is set to "true" by the operator once the PyPI Trusted Publisher registration is complete.
+    if: ${{ vars.PYPI_READY == 'true' }}
     runs-on: ubuntu-latest
     environment: pypi
     steps:
