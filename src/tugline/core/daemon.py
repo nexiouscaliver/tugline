@@ -28,7 +28,7 @@ poll loop would 429 within a minute.
 Starvation guard: one daemon thread runs flush and the reply pass in
 turn, so a reply stream that never ends would starve the spool. ntfy
 keeps healthy streams alive with keepalive events every 45 seconds,
-and every arriving line resets the read timeout — the live daemon
+and every arriving line resets the read timeout; the live daemon
 (2026-10-13) sat in one hold for twelve hours while 120 queued records
 went undelivered. Each stream pass is therefore bounded by
 flush_interval seconds (default 5): the connection's read timeout is
@@ -113,26 +113,48 @@ class Daemon:
     # -- spool flush --
 
     def flush(self) -> int:
-        """Handle every undelivered record once. Returns handled count."""
+        """Handle every undelivered record once. Returns handled count.
+
+        Every pass logs one summary line (scanned/handled/published/
+        marked/suppressed) so a silently idle or starving flush is
+        visible in daemon.err.log (the live 2026-10-13 failure hid
+        behind exactly that silence)."""
         handled = 0
         misses = 0
+        scanned = 0
+        published = 0
+        suppressed = 0
         for record in spool.undelivered(self.spool_root, on_error=self.log):
+            scanned += 1
             try:
-                ok = self._handle(record)
+                ok, published_now = self._handle(record)
             except Exception as exc:  # one bad record, one line, move on
                 self.log("record %s skipped: %s" % (record.get("id"), exc))
                 continue
             if ok:
                 handled += 1
+                if published_now:
+                    published += 1
+                else:
+                    suppressed += 1
                 misses = 0
             else:
                 misses += 1
                 if misses >= 3:
                     self.log("flush pausing after repeated publish failures")
                     break
+        self.log(
+            "flush pass: scanned=%d handled=%d published=%d marked=%d "
+            "suppressed=%d"
+            % (scanned, handled, published, handled, suppressed)
+        )
         return handled
 
-    def _handle(self, record) -> bool:
+    def _handle(self, record):
+        """Decide and finish one record. Returns (ok, published): ok is
+        True when the record was marked handled (published or consumed
+        as suppressed/state), published is True when a notification
+        actually went out."""
         if not record.get("id"):
             raise ValueError("record without id")
         name = _record_event(record)
@@ -142,7 +164,7 @@ class Daemon:
         if name == "userpromptsubmit":
             policy.record_prompt(session_id, ts_epoch, self.state_root)
             self._mark(record)
-            return True
+            return True, False
 
         turn_seconds = None
         if name == "stop":
@@ -165,12 +187,12 @@ class Daemon:
         if decision.action == "publish" and self.config.toggles.notify:
             topic = topics.resolve(decision.topic, self.config)
             if not self._publish_with_retry(topic, record, decision, name):
-                return False
+                return False, False
 
         self._mark(record)
         if name == "stop" and session_id:
             policy.disarm(session_id, self.state_root)
-        return True
+        return True, decision.action == "publish" and self.config.toggles.notify
 
     def _publish_with_retry(self, topic, record, decision, event_name) -> bool:
         delay = self.backoff_base
@@ -271,8 +293,8 @@ class Daemon:
 
         The pass ends at the server close, at the read timeout (capped
         at flush_interval), or at the flush_interval deadline, checked
-        after every line so that keepalive traffic — which resets the
-        read timeout — cannot extend the pass past the bound. After a
+        after every line so that keepalive traffic (which resets the
+        read timeout) cannot extend the pass past the bound. After a
         read timeout the socket is poisoned ("cannot read from timed
         out object"), so the pass ends rather than retrying the read;
         the caller paces and reconnects with the saved cursor."""

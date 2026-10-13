@@ -168,3 +168,57 @@ def test_held_stream_pass_is_bounded_even_under_keepalive_firehose(
     assert returned == [0]  # keepalives are not messages
     # the pass returned while the stream was still open and healthy
     assert daemon.stream_status == "held"
+
+
+# -- the summary line the live failure hid behind --
+
+
+def capture_log(daemon, monkeypatch):
+    lines = []
+    monkeypatch.setattr(daemon, "_log_fn", lines.append)
+    return lines
+
+
+def test_flush_pass_logs_one_summary_line(fake_ntfy, tmp_path, monkeypatch):
+    """Every flush pass emits exactly one summary line with truthful
+    counts: this is what was missing while 120 records sat silent."""
+    daemon = make_daemon(fake_ntfy, tmp_path)
+    lines = capture_log(daemon, monkeypatch)
+    root = str(tmp_path / "spool")
+    write_stale_sidecar(root)
+    queue_live_shape_records(root)  # 3 notify records, all published
+    append(  # a prompt record: consumed as state, no publish
+        root,
+        event="userpromptsubmit",
+        session_id="s1",
+        topic="main",
+        priority="default",
+        title="prompt",
+        body="",
+    )
+
+    assert daemon.flush() == 4
+
+    summary = [line for line in lines if line.startswith("flush pass:")]
+    assert len(summary) == 1
+    assert summary[0] == (
+        "flush pass: scanned=4 handled=4 published=3 marked=4 suppressed=1"
+    )
+
+
+def test_empty_flush_pass_still_logs_the_summary_line(
+    fake_ntfy, tmp_path, monkeypatch
+):
+    """The live 07:50 start: an empty pending spool logged nothing at
+    all, so a later starvation was invisible. An empty pass must still
+    say so."""
+    daemon = make_daemon(fake_ntfy, tmp_path)
+    lines = capture_log(daemon, monkeypatch)
+    root = str(tmp_path / "spool")
+    write_stale_sidecar(root)
+
+    assert daemon.flush() == 0
+
+    summary = [line for line in lines if line.startswith("flush pass:")]
+    assert summary == ["flush pass: scanned=0 handled=0 published=0 "
+                       "marked=0 suppressed=0"]
