@@ -20,7 +20,7 @@ opening an issue to argue for it first. Dev tooling (pytest) is fine.
 - `src/tugline/core/` the engine: spool, policy, publisher, daemon,
   topics, config. No harness knows about these files and they know about
   no harness.
-- `src/tugline/adapters/` one directory per harness (zcode, claude).
+- `src/tugline/adapters/` one directory per harness.
   Adapters translate and get out of the way.
 - `tests/` mirrors that layout. Adapter changes come with tests; the suite
   is the release gate.
@@ -50,10 +50,9 @@ comments, changelog entries.
 - No em dashes. Use a period, a comma, or a colon, or restructure the
   sentence. This is a hard rule; a sweep for dash bytes runs before every
   release.
-- No filler phrasing: no "seamlessly", "effortlessly", "robust",
-  "leverage", "game-changer", "blazing fast", "It's worth noting". Write
-  like a developer talking to a peer: short sentences, concrete commands,
-  real output examples.
+- No filler phrasing: marketing hype words are banned outright and the
+  forbidden-text sweep enforces the list. Write like a developer talking
+  to a peer: short sentences, concrete commands, real output examples.
 - Plain ASCII in prose. Code and data do what they must, but the words
   around them stay ASCII.
 - Document only what the code does. If a documented behavior and the code
