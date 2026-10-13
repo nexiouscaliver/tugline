@@ -24,7 +24,7 @@ import os
 import time
 import uuid
 
-from tugline.core import spool
+from tugline.core import approval_files, spool
 
 DEFAULT_WAIT = 120.0
 HARD_CAP = 300.0
@@ -89,34 +89,23 @@ def request_actions(config, nonce):
     return actions
 
 
-def pending_path(approvals_root, nonce) -> str:
-    return os.path.join(str(approvals_root), nonce + ".pending")
-
-
 def register_pending(approvals_root, nonce):
     """Record the nonce so the receiver can tell known from unknown.
 
     Written before the spool record exists, so a button press can
-    never beat the registration to the receiver.
+    never beat the registration to the receiver. The write itself is
+    core.approval_files, shared with the receiver and the console.
     """
-    os.makedirs(str(approvals_root), exist_ok=True)
-    path = pending_path(approvals_root, nonce)
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as fh:
-        fh.write(json.dumps({"ts": time.time()}) + "\n")
-    os.replace(tmp, path)
+    approval_files.register_pending(approvals_root, nonce)
 
 
-def read_decision(path):
-    """Read one decision file; None when missing, malformed, or unknown."""
-    try:
-        with open(path, encoding="utf-8") as fh:
-            data = json.load(fh)
-    except (OSError, ValueError):
+def read_decision(approvals_root, nonce):
+    """One decision value, or None when missing, malformed, or not a
+    value this flow knows (allow, deny, ask)."""
+    data = approval_files.read_decision(approvals_root, nonce)
+    if data is None:
         return None
-    if not isinstance(data, dict):
-        return None
-    value = str(data.get("decision", "")).strip().lower()
+    value = data["decision"].strip().lower()
     return value if value in _REASONS else None
 
 
@@ -174,11 +163,10 @@ def run(
         return None
 
     deadline = now() + effective_wait(wait)
-    path = os.path.join(str(approvals_root), token + ".json")
     max_polls = int(HARD_CAP / POLL_INTERVAL) + 2  # belt and braces:
     polls = 0  # a stuck clock must never spin the inline hook
     while now() < deadline and polls < max_polls:
-        decision = read_decision(path)
+        decision = read_decision(approvals_root, token)
         if decision is not None:
             return decision
         sleeper(POLL_INTERVAL)

@@ -22,7 +22,7 @@ import sys
 import time
 from datetime import datetime, timezone
 
-from tugline.core import payload, policy, spool
+from tugline.core import paths, payload, policy, spool
 from tugline.core.config import (
     Config,
     ConfigError,
@@ -155,7 +155,7 @@ def run(
     _stdout=None,
 ):
     """Handle one hook event. Always returns an exit code of 0."""
-    home = os.path.expanduser(home) if home else os.path.expanduser("~/.tugline")
+    home = os.path.expanduser(home) if home else paths.home_root()
     env = env if env is not None else dict(os.environ)
     out = _stdout if _stdout is not None else sys.stdout
     try:

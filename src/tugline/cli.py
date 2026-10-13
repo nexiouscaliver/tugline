@@ -7,16 +7,15 @@ import sys
 
 from tugline import __version__
 from tugline.adapters.zcode import console as zcode_console
-from tugline.core import policy, spool, topics
+from tugline.core import paths, policy, spool, topics
 from tugline.core.config import ConfigError, load_config
 from tugline.core.daemon import Daemon
 from tugline.core.publisher import Publisher
 
-TUGLINE_HOME = os.path.join("~", ".tugline")
-
 
 def tugline_path(*parts):
-    return os.path.expanduser(os.path.join(TUGLINE_HOME, *parts))
+    """One path under the tugline home (TUGLINE_HOME aware)."""
+    return os.path.join(paths.home_root(), *parts)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -69,6 +68,21 @@ def build_parser() -> argparse.ArgumentParser:
         "--once", action="store_true", help="run a single cycle and exit"
     )
 
+    console = sub.add_parser(
+        "console", help="serve the local web console on loopback"
+    )
+    console.add_argument(
+        "--port",
+        type=int,
+        default=None,
+        help="port to serve on (default: [server] console_port from config)",
+    )
+    console.add_argument(
+        "--open",
+        action="store_true",
+        help="open the console in the default browser",
+    )
+
     sub.add_parser("version", help="print the tugline version")
     from tugline.adapters.claude.hook import register_hook_command; register_hook_command(sub)  # wiring: claude adapter hook command
     return parser
@@ -91,6 +105,7 @@ def main(argv=None) -> int:
         "test": cmd_test,
         "status": cmd_status,
         "daemon": cmd_daemon,
+        "console": cmd_console,
         "version": cmd_version,
     }
     return handlers[args.command](args)
@@ -242,15 +257,61 @@ def cmd_daemon(args) -> int:
         return 2
     daemon = Daemon(
         config,
-        spool_root=tugline_path("spool"),
+        spool_root=paths.spool_root(),
         replies_path=tugline_path("replies.jsonl"),
-        state_root=policy.DEFAULT_STATE_ROOT,
+        state_root=paths.state_root(),
     )
     if args.once:
         result = daemon.run_once()
         print("handled %d, replies %d" % (result["handled"], result["replies"]))
         return 0
     daemon.serve()
+    return 0
+
+
+def cmd_console(args) -> int:
+    import signal
+    import threading
+    import webbrowser
+
+    from tugline.console.server import ConsoleServer
+    from tugline.core.store import Store
+
+    try:
+        config = load_config()
+    except ConfigError as exc:
+        print("config error: %s" % exc, file=sys.stderr)
+        return 2
+    if not config.toggles.console:
+        print("console is off in config, nothing to serve")
+        return 0
+    store = Store(paths.store_path())
+    server = ConsoleServer(
+        config, store, home=paths.home_root(), port=args.port
+    )
+    if not server.start():
+        print(
+            "console could not bind 127.0.0.1:%d" % (args.port or server.requested_port),
+            file=sys.stderr,
+        )
+        store.close()
+        return 1
+    url = "http://127.0.0.1:%d/" % server.port
+    print("tug console listening on %s" % url, flush=True)
+    print(url, flush=True)
+    if args.open:
+        webbrowser.open(url)
+    stopped = threading.Event()
+
+    def _stop(signum, frame):
+        stopped.set()
+
+    signal.signal(signal.SIGINT, _stop)
+    signal.signal(signal.SIGTERM, _stop)
+    while not stopped.is_set():
+        stopped.wait(0.5)
+    server.stop()
+    store.close()
     return 0
 
 

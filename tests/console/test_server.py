@@ -22,6 +22,7 @@ BASE_CONFIG = """\
 [server]
 url = "http://127.0.0.1:2599"
 console_port = 0
+token_file = "__TOKEN_FILE__"
 
 [topics]
 main = "tug"
@@ -39,7 +40,12 @@ console = true
 class Bench:
     """A running console plus small HTTP helpers."""
 
-    def __init__(self, home, text=BASE_CONFIG, interval=0.2):
+    def __init__(self, home, text=None, token_file=None, interval=0.2):
+        if text is None:
+            # a token file that does not exist keeps POSTs open; the
+            # machine's real ~/.tugline must never leak into a test
+            target = token_file or (home / "credentials-absent")
+            text = BASE_CONFIG.replace("__TOKEN_FILE__", str(target))
         (home / "config.toml").write_text(text)
         self.home = str(home)
         self.config = load_config()
@@ -378,11 +384,7 @@ def test_token_gates_post_but_not_get(tmp_path, monkeypatch):
     monkeypatch.setenv("TUGLINE_HOME", str(tmp_path))
     monkeypatch.delenv("TUGLINE_CONFIG", raising=False)
     (tmp_path / "credentials").write_text("sekret-token\n")
-    text = BASE_CONFIG.replace(
-        'console_port = 0',
-        'console_port = 0\ntoken_file = "%s"' % (tmp_path / "credentials"),
-    )
-    bench = Bench(tmp_path, text=text)
+    bench = Bench(tmp_path, token_file=tmp_path / "credentials")
     try:
         status, _ = bench.get_json("/api/state")
         assert status == 200
@@ -410,6 +412,7 @@ def test_stream_snapshot_then_delta_after_ingest(bench, home):
     current = None
     got_snapshot = False
     seeded = None
+    expected_id = None
     with urllib.request.urlopen(req, timeout=20) as resp:
         assert resp.headers.get("Content-Type", "").startswith(
             "text/event-stream"
@@ -428,11 +431,20 @@ def test_stream_snapshot_then_delta_after_ingest(bench, home):
                     got_snapshot = True
             if got_snapshot and seeded is None:
                 seeded = seed_permission_request("nonce-sse")
-            if seeded is not None and seen.get("delta", {}).get(
+            if seeded is not None and expected_id is None:
+                rows = [
+                    e
+                    for e in bench.store.events(limit=50)
+                    if e["spool_id"] == seeded["id"]
+                ]
+                if rows:
+                    expected_id = rows[0]["id"]
+            if expected_id is not None and seen.get("delta", {}).get(
                 "last_event_id"
-            ) == seeded["id"]:
+            ) == expected_id:
                 break
     assert got_snapshot
     assert "counts" in seen["snapshot"]
-    assert seen["delta"]["last_event_id"] == seeded["id"]
+    assert expected_id is not None
+    assert seen["delta"]["last_event_id"] == expected_id
     assert "counts" in seen["delta"]
