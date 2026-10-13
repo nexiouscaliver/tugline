@@ -63,6 +63,52 @@ def test_actions_omitted_when_not_given(tmp_path):
     assert "actions" not in rec
 
 
+# Session enrichment extras (adapter, cwd, project)
+
+
+def test_extra_fields_merge_into_the_record(tmp_path):
+    rec = write(
+        tmp_path,
+        extra={"adapter": "zcode", "cwd": "/w/proj", "project": "proj"},
+    )
+    assert rec["adapter"] == "zcode"
+    assert rec["cwd"] == "/w/proj"
+    assert rec["project"] == "proj"
+
+
+def test_extra_values_are_coerced_to_strings(tmp_path):
+    rec = write(tmp_path, extra={"count": 5, "flag": True})
+    assert rec["count"] == "5"
+    assert rec["flag"] == "True"
+
+
+def test_extra_lands_after_fixed_fields_and_before_delivered(tmp_path):
+    rec = write(tmp_path, extra={"adapter": "zcode"})
+    keys = list(rec)
+    assert keys.index("adapter") > keys.index("body")
+    assert keys.index("delivered") == len(keys) - 1
+    line = (tmp_path / "2026-10-13.jsonl").read_text().splitlines()[0]
+    assert json.loads(line) == rec
+
+
+def test_extra_fields_round_trip_through_the_day_file(tmp_path):
+    write(tmp_path, extra={"adapter": "claude", "project": "tugline"})
+    rec = records(str(tmp_path))[0]
+    assert rec["adapter"] == "claude"
+    assert rec["project"] == "tugline"
+
+
+def test_record_without_extra_is_byte_identical_to_before(tmp_path):
+    """Exact line pin: same keys, same order, same separators, no extras."""
+    rec = write(tmp_path)
+    line = (tmp_path / "2026-10-13.jsonl").read_text(encoding="utf-8")
+    assert line == (
+        '{"id":"%s","ts":"2026-10-13T12:00:00+00:00","event":"notify",'
+        '"session_id":"s1","topic":"tug","priority":"default",'
+        '"title":"hi","body":"hello there","delivered":false}\n' % rec["id"]
+    )
+
+
 def test_ids_are_unique(tmp_path):
     ids = {write(tmp_path)["id"] for _ in range(10)}
     assert len(ids) == 10
