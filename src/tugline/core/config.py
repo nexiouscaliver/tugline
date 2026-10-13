@@ -79,7 +79,8 @@ idle_seconds = 600
 # tugline was installed: nothing published, nothing polled.
 notify = true
 replies = true
-# Approve action buttons on notifications. Not wired up yet.
+# Approve action buttons on notifications; needs the daemon receiver
+# and a reachable external_url.
 approve = false
 """
 
