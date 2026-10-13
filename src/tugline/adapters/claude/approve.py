@@ -48,26 +48,58 @@ def effective_timeout(timeout) -> float:
 
 
 def action_buttons(config, approve_id):
-    """The Approve and Deny http buttons for the flagged record."""
-    base = config.server.url.rstrip("/")
-    return [
-        {
+    """The Approve and Deny http buttons for the flagged record.
+
+    The base comes from [server] external_url when set (a proxy host
+    routing /approvals back to this machine), the ntfy url otherwise.
+    When a token is configured the buttons carry it, so the receiver
+    can authenticate the press; without a token the buttons go out
+    bare and the receiver runs open, loopback only.
+    """
+    from tugline.core.publisher import Publisher
+
+    base = config.server.action_base.rstrip("/")
+    headers = None
+    token = Publisher(
+        config.server.url, config.server.token_file
+    ).read_token()
+    if token:
+        headers = {"Authorization": "Bearer " + token}
+    buttons = []
+    for label, decision in (("Approve", "allow"), ("Deny", "deny")):
+        button = {
             "action": "http",
-            "label": "Approve",
-            "url": "%s/%s/%s?decision=allow" % (base, APPROVALS_DIRNAME, approve_id),
+            "label": label,
+            "url": "%s/%s/%s?decision=%s"
+            % (base, APPROVALS_DIRNAME, approve_id, decision),
             "method": "POST",
-        },
-        {
-            "action": "http",
-            "label": "Deny",
-            "url": "%s/%s/%s?decision=deny" % (base, APPROVALS_DIRNAME, approve_id),
-            "method": "POST",
-        },
-    ]
+        }
+        if headers:
+            button["headers"] = dict(headers)
+        buttons.append(button)
+    return buttons
 
 
 def decision_path(state_root, approve_id) -> str:
     return os.path.join(str(state_root), APPROVALS_DIRNAME, approve_id + ".json")
+
+
+def pending_path(state_root, approve_id) -> str:
+    return os.path.join(str(state_root), APPROVALS_DIRNAME, approve_id + ".pending")
+
+
+def register_pending(state_root, approve_id):
+    """Record the nonce so the receiver can tell known from unknown.
+
+    Written before the spool record exists, so a button press can
+    never beat the registration to the receiver.
+    """
+    path = pending_path(state_root, approve_id)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        fh.write(json.dumps({"ts": time.time()}) + "\n")
+    os.replace(tmp, path)
 
 
 def read_decision(state_root, approve_id):
@@ -119,6 +151,7 @@ def publish_request(
     spool_root,
     config=None,
     approve_id=None,
+    state_root=None,
 ):
     """Append the permission request record; buttons only when approve is on."""
     approve_id = approve_id or new_approve_id()
@@ -128,6 +161,8 @@ def publish_request(
     actions = None
     if config is not None and config.toggles.approve:
         actions = action_buttons(config, approve_id)
+        if state_root:
+            register_pending(state_root, approve_id)
     return (
         spool.append(
             spool_root,
@@ -166,6 +201,7 @@ def handle(
         spool_root=spool_root,
         config=config,
         approve_id=approve_id,
+        state_root=state_root,
     )
     if not (config.toggles.approve and config.toggles.notify):
         return None

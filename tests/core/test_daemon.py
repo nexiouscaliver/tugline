@@ -167,8 +167,9 @@ def test_run_once_flushes_and_polls(fake_ntfy, tmp_path):
 
 def test_serve_runs_cycles_until_stop_requested(fake_ntfy, tmp_path):
     daemon = make_daemon(fake_ntfy, tmp_path)
+    daemon.config.toggles.replies = False  # keep the cycle to flush only
     cycles = []
-    original = daemon.run_once
+    original = daemon.flush
 
     def counting():
         cycles.append(1)
@@ -176,7 +177,7 @@ def test_serve_runs_cycles_until_stop_requested(fake_ntfy, tmp_path):
             daemon.request_stop()
         return original()
 
-    daemon.run_once = counting
+    daemon.flush = counting
     daemon.serve()
     assert len(cycles) == 3
 
