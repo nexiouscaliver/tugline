@@ -142,3 +142,29 @@ def test_records_queued_while_the_stream_is_held_still_deliver(
     marked = delivered_ids(root)
     assert all(rid in marked for rid in queued)
     assert list(undelivered(root)) == []  # what tug status counts
+
+
+def test_held_stream_pass_is_bounded_even_under_keepalive_firehose(
+    fake_ntfy, tmp_path
+):
+    """The pass itself must end: keepalives arriving faster than the
+    read timeout reset it line by line, which on main held the stream
+    open forever. stream_replies must return within the bound even so."""
+    fake_ntfy.stream_mode = "hold"
+    daemon = make_daemon(
+        fake_ntfy, tmp_path, stream_timeout=6.0, flush_interval=1.0
+    )
+    keepalives = start_keepalive_pump(fake_ntfy, 0.2)
+
+    returned = []
+    thread = threading.Thread(
+        target=lambda: returned.append(daemon.stream_replies()), daemon=True
+    )
+    thread.start()
+    thread.join(timeout=5)
+
+    keepalives.set()
+    assert thread.is_alive() is False, "stream pass never ended (live bug)"
+    assert returned == [0]  # keepalives are not messages
+    # the pass returned while the stream was still open and healthy
+    assert daemon.stream_status == "held"
