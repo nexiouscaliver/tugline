@@ -1,6 +1,6 @@
 [project]
 name = "tugline"
-version = "0.1.0.dev0"
+version = "0.1.0"
 description = "Push notifications and phone replies for coding-agent sessions, over ntfy"
 readme = "README.md"
 license = "MIT"
