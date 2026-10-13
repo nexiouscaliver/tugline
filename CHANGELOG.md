@@ -39,13 +39,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   disconnect.
 - `tug` CLI: `notify`, `arm`, `disarm`, `test`, `status`, `daemon`
   (with `--once`), `version`, and the adapter entries `hook-zcode`,
-  `install zcode`, `uninstall zcode`, and the other adapter's hook
-  entry.
+  `install zcode`, `uninstall zcode`, `hook-claude`.
 - zcode adapter: hook entry, byte-preserving installer and uninstaller for
   `~/.zcode/cli/config.json`, and a bounded fail-closed approve flow behind
   the approve toggle (off by default).
 - Claude Code adapter: hook entry, append-only installer and uninstaller
-  for the harness settings file, and a bounded fail-closed approve flow
+  for `~/.claude/settings.json`, and a bounded fail-closed approve flow
   behind the approve toggle (off by default).
 - Approve receiver: loopback HTTP listener (`approve_port`) that records
   Approve/Deny button presses as decisions; `external_url` points the

@@ -76,7 +76,7 @@ come back the same way, into a local file.
  harness events                  your machine                    phone
  --------------   ---------------------------------------     ----------
  zcode hooks
- Claude Code  -->  its tug hook entry
+ Claude Code  -->  tug hook-zcode / tug hook-claude
  any CLI          tug notify
                         |
                         v
@@ -104,7 +104,7 @@ come back the same way, into a local file.
 - zcode: `tug install zcode` wires SessionStart, Stop, and PermissionRequest
   into `~/.zcode/cli/config.json`. `tug uninstall zcode` takes them back out.
 - Claude Code: no installer command yet; paste one hook block into
-  its settings file. The exact block is in
+  `~/.claude/settings.json`. The exact block is in
   [docs/adapters.md](docs/adapters.md).
 - Any CLI tool: `tug notify --title "build done" --body "green"` queues a
   notification from a script, a cron job, or a make target.
