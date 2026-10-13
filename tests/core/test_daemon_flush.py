@@ -222,3 +222,47 @@ def test_empty_flush_pass_still_logs_the_summary_line(
     summary = [line for line in lines if line.startswith("flush pass:")]
     assert summary == ["flush pass: scanned=0 handled=0 published=0 "
                        "marked=0 suppressed=0"]
+
+
+def test_suppressed_records_are_marked_once_and_never_republished(
+    fake_ntfy, tmp_path
+):
+    """Fix contract: a policy suppression is final for that record.
+    With flush now running every few seconds, suppressed records must
+    not be re-evaluated (and could never be re-published) forever —
+    one pass decides, marks in the sidecar, and every later pass skips
+    them: stale records never re-publish after a policy decision."""
+    daemon = make_daemon(fake_ntfy, tmp_path)
+    root = str(tmp_path / "spool")
+    write_stale_sidecar(root)
+    suppressed_id = append(
+        root,
+        event="sessionstart",  # not a resume: policy suppresses it
+        session_id="s1",
+        topic="main",
+        priority="default",
+        title="session started",
+        body="",
+    )["id"]
+    stopped_id = append(
+        root,
+        event="stop",  # short turn, not armed: policy suppresses it
+        session_id="s1",
+        topic="main",
+        priority="default",
+        title="session stopped",
+        body="",
+    )["id"]
+
+    assert daemon.flush() == 2
+    assert fake_ntfy.posts() == []
+    marked = delivered_ids(root)
+    assert suppressed_id in marked and stopped_id in marked
+
+    # repeated passes over the same spool: nothing re-evaluated, nothing
+    # published, the sidecar does not churn
+    for _ in range(3):
+        assert daemon.flush() == 0
+    assert fake_ntfy.posts() == []
+    assert len(delivered_ids(root)) == 3  # stale id + the two records
+    assert list(undelivered(root)) == []
