@@ -91,7 +91,10 @@ all land under that root, leaving `~/.tugline` alone.
 ## The API
 
 Everything the page uses is plain HTTP on the same port, so you can
-drive it with curl. GETs are the reads; POSTs are the writes.
+drive it with curl. GETs are the reads; POSTs are the writes. When
+the configured token file holds a token, every call in the table
+requires it, as a Bearer header or a `?token=` parameter (see
+Security below).
 
 | Method and path | What it does |
 | --- | --- |
@@ -113,15 +116,18 @@ chronologically.
 
 - The console binds 127.0.0.1 only. Nothing listens on any other
   interface, on any port.
-- POST endpoints carry the same bearer posture as the approve
-  receiver: when the configured token file exists and holds a token,
-  a POST without `Authorization: Bearer <token>` gets a 403. With no
-  token on file (the default), POSTs are open to whatever can already
-  reach loopback.
-- One consequence worth knowing: the page itself sends no
-  Authorization header. With a token configured the page still
-  renders, but its reply and approve buttons fail with 403; use curl
-  with the header for writes in that setup.
+- Every API endpoint, read or write, carries the same bearer posture
+  as the approve receiver: when the configured token file exists and
+  holds a token, a request without the token gets a 403. The token is
+  accepted as an `Authorization: Bearer <token>` header or a
+  `?token=<token>` query parameter, because phone browsers cannot set
+  headers on an EventSource. With no token on file (the default),
+  reads and writes are open to whatever can already reach loopback.
+- The page itself is a static shell with no data, so it serves
+  without a token. When the page URL carries `?token=`, the page
+  captures it and appends it to every API and stream call; when a
+  call comes back 403 instead, a paste-token bar appears. The page
+  cannot show any data without a valid token either way.
 - The token is never rendered. No API response and no page element
   includes the token or the token file contents.
 
@@ -135,3 +141,11 @@ available on every client, so prefer the port form. This is a
 suggestion, not a setup tugline manages; think through what you expose
 the same way you would for the approve receiver (see
 [docs/adapters.md](adapters.md)).
+
+Exposing the console on a tailnet REQUIRES the token file: configure
+`token_file` in `~/.tugline/config.toml` with a token in it before
+you add the serve rule, so the console's reads and writes are gated.
+Share the page URL with the token in it
+(`https://<tailnet-name>/?token=<token>`); the page captures it once
+and every call after that carries it, and a phone user without the
+link gets the paste-token bar instead of data.

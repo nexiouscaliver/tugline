@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- Console GET endpoints (state, sessions, events, threads, replies,
+  and the SSE stream) now require the shared token when the
+  configured token file holds one, accepting it as a Bearer header or
+  a `?token=` query parameter; the console page stays a static shell
+  that captures `?token=` from its URL, and the loopback default
+  without a token on file is unchanged. Tailnet exposure requires the
+  token file.
+
 ### Fixed
 
 - `tug version` now reports the installed distribution version instead of a stale hardcoded 0.1.0.

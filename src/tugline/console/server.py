@@ -2,10 +2,14 @@
 
 ConsoleServer owns two threads: an ingest thread folding the spool
 into the store on a fixed interval, and a ThreadingHTTPServer serving
-127.0.0.1 only. The bind address is the security boundary for reads;
-write endpoints (POST) additionally require the same bearer token the
-rest of tugline uses when the configured token file holds one, the
-same posture as the approve receiver.
+127.0.0.1 only. Every /api endpoint, read or write, requires the same
+bearer token the rest of tugline uses when the configured token file
+holds one, the same posture as the approve receiver; the token may
+travel as an Authorization: Bearer header or a ?token= query
+parameter, because phone browsers cannot set headers on EventSource.
+The page itself stays a static shell with no data, so it serves
+without a token and lets the client attach one. With no token on
+file the console is exactly the open loopback default.
 
 Replies written here are recorded twice with one meaning: a store row
 with source=console for the console itself, and a line appended to
@@ -77,6 +81,11 @@ class _Handler(BaseHTTPRequestHandler):
     def _route(self, method):
         console = self.server.console
         if method == "GET" and urlsplit(self.path).path == "/api/events/stream":
+            parts = urlsplit(self.path)
+            denied = console.auth_denied(self.headers, parse_qs(parts.query))
+            if denied is not None:
+                self._send_json(*denied)
+                return
             try:
                 console.stream_state(self)
             except Exception:
@@ -92,11 +101,18 @@ class _Handler(BaseHTTPRequestHandler):
             status, payload = 500, {"error": "console error"}
         if isinstance(payload, _Raw):
             data, content_type = payload.body, payload.content_type
+            self.send_response(status)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
         else:
-            data = json.dumps(payload, separators=(",", ":")).encode("utf-8")
-            content_type = "application/json"
+            self._send_json(status, payload)
+
+    def _send_json(self, status, payload):
+        data = json.dumps(payload, separators=(",", ":")).encode("utf-8")
         self.send_response(status)
-        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
@@ -206,17 +222,41 @@ class ConsoleServer:
         if len(segments) < 2:
             return 404, {"error": "unknown endpoint"}
 
+        # the one auth gate, reads and writes alike; the stream checks
+        # it in the handler before the response head is sent
+        denied = self.auth_denied(headers, query)
+        if denied is not None:
+            return denied
+
         name = segments[1]
         if method == "GET":
             return self._get(name, segments, query)
         if method == "POST":
-            expected = self.read_token()
-            if expected:
-                provided = headers.get("Authorization") or ""
-                if provided != "Bearer " + expected:
-                    return 403, {"error": "bad token"}
             return self._post(name, segments, query, body)
         return 404, {"error": "unknown endpoint"}
+
+    def auth_denied(self, headers, query):
+        """The 403 gate on every /api request, or None when it passes.
+
+        No token on file (the loopback default) means open access for
+        exactly today's behavior. With a token on file the request
+        must carry it as an Authorization: Bearer header or a ?token=
+        query parameter (phone browsers cannot set headers on
+        EventSource); anything else is the receiver's plain 403. The
+        token source is the same read_token the POST gate always
+        used, read per request so a token change takes effect at
+        once.
+        """
+        expected = self.read_token()
+        if not expected:
+            return None
+        provided = headers.get("Authorization") or ""
+        if provided == "Bearer " + expected:
+            return None
+        values = query.get("token") or []
+        if values and str(values[0]) == expected:
+            return None
+        return 403, {"error": "bad token"}
 
     def _index(self):
         try:

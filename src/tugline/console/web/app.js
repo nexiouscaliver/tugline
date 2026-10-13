@@ -9,6 +9,13 @@
  * (every 30 seconds) keeps the header health honest, because daemon,
  * ntfy, and spool depth otherwise only ride on snapshots.
  *
+ * The page is a static shell: it carries no data and opens without a
+ * token. When the server has a token configured, every API and SSE
+ * call needs it. The token comes from the ?token= in the page URL
+ * (the phone path: browsers cannot set headers on EventSource) or
+ * from the paste-token bar that appears as soon as any call fails
+ * with 403. It is held in memory only and never rendered.
+ *
  * Delivery chips follow core.policy: userpromptsubmit and sessionstart
  * records never notify (a resume sessionstart can, but the store row
  * carries no source field, so the console hides the chip for all of
@@ -35,9 +42,23 @@ const state = {
 
 let stream = null; // the EventSource, or null before the first open
 
+let apiToken = ""; // from ?token= in the page URL, or pasted into the bar
+
 const $ = (id) => document.getElementById(id);
 
 // -- small helpers --
+
+function withToken(path) {
+  // every call carries the token when one is known; EventSource
+  // cannot set headers, so the query parameter is the shared path
+  if (!apiToken) return path;
+  return (
+    path +
+    (path.includes("?") ? "&" : "?") +
+    "token=" +
+    encodeURIComponent(apiToken)
+  );
+}
 
 function short8(value) {
   const text = String(value || "");
@@ -86,7 +107,7 @@ function isSelected(kind, id) {
 }
 
 async function api(path, options) {
-  const response = await fetch(path, options);
+  const response = await fetch(withToken(path), options);
   let payload = {};
   try {
     payload = await response.json();
@@ -94,9 +115,35 @@ async function api(path, options) {
     // an empty or non-json body is fine to read as {}
   }
   if (!response.ok) {
+    if (response.status === 403) showTokenBar(); // the paste fallback
     throw new Error(payload.error || "HTTP " + response.status);
   }
   return payload;
+}
+
+// -- token bar: the paste fallback when auth fails --
+
+function showTokenBar() {
+  const bar = $("token-bar");
+  if (!bar.hidden) return;
+  bar.hidden = false;
+  $("token-input").focus();
+}
+
+async function applyToken() {
+  const input = $("token-input");
+  const value = input.value.trim();
+  if (!value) return;
+  apiToken = value;
+  input.value = ""; // held in memory only, never rendered back
+  $("token-bar").hidden = true;
+  try {
+    applyState(await api("/api/state"));
+  } catch (err) {
+    showTokenBar(); // still denied: let the user paste again
+    return;
+  }
+  connectStream(); // a new EventSource picks up the token
 }
 
 // -- header --
@@ -500,7 +547,7 @@ function onDelta(delta) {
 
 function connectStream() {
   if (stream !== null) stream.close();
-  stream = new EventSource("/api/events/stream");
+  stream = new EventSource(withToken("/api/events/stream"));
   stream.onopen = paintLiveChip;
   stream.onerror = () => {
     paintLiveChip();
@@ -553,6 +600,14 @@ async function init() {
       sendReply();
     }
   });
+  $("token-save").addEventListener("click", applyToken);
+  $("token-input").addEventListener("keydown", (event) => {
+    if (event.key === "Enter") applyToken();
+  });
+
+  // capture ?token= from the page URL: the shell opened without
+  // data, and this one value unlocks every call that follows
+  apiToken = (new URLSearchParams(window.location.search).get("token") || "").trim();
 
   // paint from the state snapshot before the stream opens
   try {

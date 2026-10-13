@@ -89,6 +89,37 @@ body {
 .dot-red { background: var(--red); }
 .dot-gray { background: var(--gray); }
 
+/* -- token bar: the paste fallback when a call fails auth -- */
+
+.tokenbar {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 0.8rem;
+  border-bottom: 1px solid var(--border);
+  background: rgba(210, 153, 34, 0.08);
+}
+
+.tokenbar[hidden] { display: none; }
+
+.tokenbar label {
+  font-family: var(--mono);
+  font-size: 0.9rem;
+  color: var(--amber);
+}
+
+.tokenbar input {
+  flex: 1;
+  min-width: 0;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 2px;
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 0.9rem;
+  padding: 0.35rem 0.5rem;
+}
+
 /* -- layout -- */
 
 main {
