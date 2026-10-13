@@ -76,6 +76,24 @@ def request_actions(base_url, session_id, nonce):
     ]
 
 
+def pending_path(approvals_root, nonce) -> str:
+    return os.path.join(str(approvals_root), nonce + ".pending")
+
+
+def register_pending(approvals_root, nonce):
+    """Record the nonce so the receiver can tell known from unknown.
+
+    Written before the spool record exists, so a button press can
+    never beat the registration to the receiver.
+    """
+    os.makedirs(str(approvals_root), exist_ok=True)
+    path = pending_path(approvals_root, nonce)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        fh.write(json.dumps({"ts": time.time()}) + "\n")
+    os.replace(tmp, path)
+
+
 def read_decision(path):
     """Read one decision file; None when missing, malformed, or unknown."""
     try:
@@ -127,6 +145,7 @@ def run(
     short = str(session_id)[:8]
 
     try:
+        register_pending(approvals_root, token)
         spool.append(
             str(spool_root),
             event="permissionrequest",

@@ -225,6 +225,7 @@ def test_claude_approve_registers_a_pending_nonce(tmp_path):
         def sleep(self, seconds):
             self.now += seconds
 
+    clock = Clock()
     approve_module.handle(
         {"tool_name": "Bash"},
         session_id="s-rc",
@@ -233,8 +234,8 @@ def test_claude_approve_registers_a_pending_nonce(tmp_path):
         state_root=str(tmp_path / "state"),
         timeout=0,
         approve_id="pend1",
-        sleep=Clock.sleep,
-        monotonic=Clock.monotonic,
+        sleep=clock.sleep,
+        monotonic=clock.monotonic,
     )
 
     register = tmp_path / "state" / "approvals" / "pend1.pending"
@@ -261,6 +262,7 @@ def test_zcode_approve_registers_a_pending_nonce(tmp_path):
         def clock(self):
             return self.now
 
+    clock = Clock()
     zcode_approve.run(
         "s-zc",
         config=config,
@@ -268,8 +270,8 @@ def test_zcode_approve_registers_a_pending_nonce(tmp_path):
         approvals_root=str(tmp_path / "approvals"),
         wait=0,
         nonce="pend2",
-        sleep=Clock.sleep,
-        clock=Clock.clock,
+        sleep=clock.sleep,
+        clock=clock.clock,
     )
 
     assert (tmp_path / "approvals" / "pend2.pending").exists()
@@ -297,18 +299,20 @@ def test_button_press_end_to_end_reaches_the_polling_module(
         def clock(self):
             return self.now
 
+    clock = Clock()
     kwargs = dict(
         config=config,
         spool_root=str(tmp_path / "spool"),
         approvals_root=state_root + "/approvals",
         wait=0,
         nonce="e2e",
-        sleep=Clock.sleep,
-        clock=Clock.clock,
+        sleep=clock.sleep,
+        clock=clock.clock,
     )
     zcode_approve.run("s-e2e", **kwargs)  # registers the pending nonce
 
     status, _ = press(receiver, "e2e", "deny")
 
     assert status == 200
+    kwargs["wait"] = 0.5  # one poll: the decision is already on disk
     assert zcode_approve.run("s-e2e", **kwargs) == "deny"  # the poll sees it

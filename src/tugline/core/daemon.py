@@ -90,6 +90,7 @@ class Daemon:
         self._stop = False
         self.stream_status = None
         self._next_reply_request_at = None
+        self._receiver = None
 
     def log(self, line):
         self._log_fn(line)
@@ -398,6 +399,8 @@ class Daemon:
     def serve(self):
         """Run cycles until SIGTERM (or a stop request) lands."""
         self._install_signal_handlers()
+        if self.config.toggles.approve:
+            self.start_approve_receiver()
         self.log("daemon started")
         try:
             while not self._stop:
@@ -410,7 +413,30 @@ class Daemon:
                     self.sleep(self.cycle_idle)
         except KeyboardInterrupt:
             pass
+        finally:
+            self.stop_approve_receiver()
         self.log("daemon stopped")
+
+    # -- approve receiver --
+
+    def start_approve_receiver(self) -> bool:
+        """Serve the button endpoints on 127.0.0.1:<approve_port>."""
+        if self._receiver is not None:
+            return True
+        from tugline.core.receiver import ApproveReceiver
+
+        self._receiver = ApproveReceiver(
+            self.config,
+            state_root=self.state_root,
+            read_token=self.publisher.read_token,
+            log=self.log,
+        )
+        return self._receiver.start()
+
+    def stop_approve_receiver(self):
+        if self._receiver is not None:
+            self._receiver.stop()
+            self._receiver = None
 
     def request_stop(self):
         self._stop = True

@@ -70,6 +70,24 @@ def decision_path(state_root, approve_id) -> str:
     return os.path.join(str(state_root), APPROVALS_DIRNAME, approve_id + ".json")
 
 
+def pending_path(state_root, approve_id) -> str:
+    return os.path.join(str(state_root), APPROVALS_DIRNAME, approve_id + ".pending")
+
+
+def register_pending(state_root, approve_id):
+    """Record the nonce so the receiver can tell known from unknown.
+
+    Written before the spool record exists, so a button press can
+    never beat the registration to the receiver.
+    """
+    path = pending_path(state_root, approve_id)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        fh.write(json.dumps({"ts": time.time()}) + "\n")
+    os.replace(tmp, path)
+
+
 def read_decision(state_root, approve_id):
     """Return a normalized decision dict, or None when there is no answer yet."""
     try:
@@ -119,6 +137,7 @@ def publish_request(
     spool_root,
     config=None,
     approve_id=None,
+    state_root=None,
 ):
     """Append the permission request record; buttons only when approve is on."""
     approve_id = approve_id or new_approve_id()
@@ -128,6 +147,8 @@ def publish_request(
     actions = None
     if config is not None and config.toggles.approve:
         actions = action_buttons(config, approve_id)
+        if state_root:
+            register_pending(state_root, approve_id)
     return (
         spool.append(
             spool_root,
@@ -166,6 +187,7 @@ def handle(
         spool_root=spool_root,
         config=config,
         approve_id=approve_id,
+        state_root=state_root,
     )
     if not (config.toggles.approve and config.toggles.notify):
         return None
