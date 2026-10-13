@@ -37,6 +37,13 @@ SSE_PING_SECONDS = 15.0
 REPLY_LINE_LIMIT = 4096
 REPLY_TITLE = "console reply"
 _NONCE = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
+_WEB_NAME = re.compile(r"^[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)?$")
+_WEB_TYPES = {
+    ".html": "text/html; charset=utf-8",
+    ".css": "text/css",
+    ".js": "text/javascript",
+    ".svg": "image/svg+xml",
+}
 
 _INDEX_HTML = Path(__file__).resolve().parent / "web" / "index.html"
 
@@ -187,7 +194,16 @@ class ConsoleServer:
             if method != "GET":
                 return 404, {"error": "unknown endpoint"}
             return self._index()
-        if segments[0] != "api" or len(segments) < 2:
+        if segments[0] != "api":
+            # one safe bare name is a web asset ("/" itself is the index)
+            if (
+                method == "GET"
+                and len(segments) == 1
+                and _WEB_NAME.match(segments[0])
+            ):
+                return self._web_asset(segments[0])
+            return 404, {"error": "unknown endpoint"}
+        if len(segments) < 2:
             return 404, {"error": "unknown endpoint"}
 
         name = segments[1]
@@ -208,6 +224,26 @@ class ConsoleServer:
         except OSError:
             return 500, {"error": "console page missing"}
         return 200, _Raw(page, "text/html; charset=utf-8")
+
+    def _web_asset(self, name):
+        """One file from the web directory, or the usual 404.
+
+        The name is already a single safe segment (checked by the
+        router); realpath then confirms the file really sits inside
+        the web directory before it is read.
+        """
+        root = _INDEX_HTML.parent
+        target = Path(os.path.realpath(root / name))
+        if target.parent != root or not target.is_file():
+            return 404, {"error": "unknown endpoint"}
+        try:
+            body = target.read_bytes()
+        except OSError:
+            return 404, {"error": "unknown endpoint"}
+        content_type = _WEB_TYPES.get(
+            target.suffix.lower(), "application/octet-stream"
+        )
+        return 200, _Raw(body, content_type)
 
     def _get(self, name, segments, query):
         if name == "state" and len(segments) == 2:
