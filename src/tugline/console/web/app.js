@@ -139,7 +139,7 @@ function stateCell(value) {
   const name = String(value || "running");
   const label = name === "waiting" ? "waiting on me" : name;
   const tone = name === "running" ? "green" : name === "waiting" ? "amber" : "gray";
-  const cell = el("td");
+  const cell = el("td", "cell-state");
   cell.append(el("span", "chip chip-state chip-" + tone, label));
   return cell;
 }
@@ -159,7 +159,7 @@ function sessionRow(session) {
 
   row.append(stateCell(session.state));
 
-  const idCell = el("td");
+  const idCell = el("td", "cell-id");
   const button = el("button", "idlink", short8(session.session_id));
   button.type = "button";
   button.title = session.session_id;
@@ -180,7 +180,20 @@ function sessionRow(session) {
   return row;
 }
 
+// Adapter and project are empty until field enrichment lands, so the
+// two columns render only when the current data carries at least one
+// non-empty value; the classes are re-derived on every repaint and
+// the columns come back on their own once enriched data arrives.
 function paintSessions() {
+  const hasAdapter = state.sessions.some(
+    (session) => String(session.adapter || "").trim() !== ""
+  );
+  const hasProject = state.sessions.some(
+    (session) => String(session.project || "").trim() !== ""
+  );
+  const table = $("sessions-table");
+  table.classList.toggle("no-adapter", !hasAdapter);
+  table.classList.toggle("no-project", !hasProject);
   $("sessions-body").replaceChildren(...state.sessions.map(sessionRow));
   $("sessions-empty").hidden = state.sessions.length > 0;
 }

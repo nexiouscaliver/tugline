@@ -107,11 +107,26 @@ main {
       "sessions asks"
       "sessions reply"
       "stream stream";
+    align-items: start;
   }
   #sessions-panel { grid-area: sessions; }
   #asks-panel { grid-area: asks; }
   #reply-panel { grid-area: reply; }
   #stream-panel { grid-area: stream; }
+}
+
+/* phones stack the panels with the stream directly under sessions:
+   header, sessions, stream, asks, reply */
+@media (max-width: 719px) {
+  main {
+    display: flex;
+    flex-direction: column;
+    gap: 0.7rem;
+  }
+  #sessions-panel { order: 1; }
+  #stream-panel { order: 2; }
+  #asks-panel { order: 3; }
+  #reply-panel { order: 4; }
 }
 
 .panel {
@@ -245,6 +260,81 @@ tr.selected .idlink { color: var(--accent); }
   text-align: right;
 }
 
+/* adapter and project stay empty until field enrichment lands, so
+   those columns render only when some session in the current data
+   carries a value; paintSessions toggles these classes per repaint */
+#sessions-table.no-adapter .col-adapter,
+#sessions-table.no-adapter td.cell-badge { display: none; }
+
+#sessions-table.no-project .col-project,
+#sessions-table.no-project td.cell-project { display: none; }
+
+/* phones: session rows restyle as stacked two-line rows. Line 1 is
+   the state chip, short id, adapter badge, relative time; line 2 is
+   the last event with ellipsis plus the project label. Nothing
+   scrolls sideways. */
+@media (max-width: 719px) {
+  .scroll { overflow: visible; }
+
+  #sessions-table {
+    display: block;
+    min-width: 0;
+  }
+
+  #sessions-table thead { display: none; }
+
+  #sessions-table tbody { display: block; }
+
+  #sessions-table tr {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto auto;
+    grid-template-areas:
+      "state id adapter time"
+      "event event event project";
+    column-gap: 0.55rem;
+    row-gap: 0.2rem;
+    align-items: center;
+    padding: 0.45rem 0;
+    border-bottom: 1px solid var(--row-line);
+  }
+
+  #sessions-table tr.selected { background: rgba(88, 166, 255, 0.09); }
+
+  #sessions-table td {
+    display: block;
+    min-width: 0;
+    padding: 0;
+    border: none;
+  }
+
+  #sessions-table tr.selected td { background: none; }
+
+  #sessions-table td.cell-state { grid-area: state; }
+  #sessions-table td.cell-id { grid-area: id; }
+  #sessions-table td.cell-badge {
+    grid-area: adapter;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  #sessions-table td.cell-time { grid-area: time; justify-self: end; }
+
+  #sessions-table td.cell-event {
+    grid-area: event;
+    max-width: none;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  #sessions-table td.cell-project {
+    grid-area: project;
+    justify-self: end;
+    max-width: 40%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+}
+
 /* -- live stream -- */
 
 .stream {
@@ -287,6 +377,38 @@ tr.selected .idlink { color: var(--accent); }
 
 .stream .chip,
 .stream .nochip { justify-self: end; }
+
+/* phones: stream rows are flex rows that fit the viewport. The
+   flexible text ellipsizes instead of clipping mid-word, and the
+   delivery chip never shrinks, so it stays visible. */
+@media (max-width: 719px) {
+  .stream { min-width: 0; }
+
+  .stream li {
+    display: flex;
+    align-items: baseline;
+    gap: 0.4rem;
+    min-width: 0;
+  }
+
+  .stream .t,
+  .stream .sid { flex: none; }
+
+  .stream .ev {
+    flex: 0 1 auto;
+    min-width: 0;
+    max-width: 9ch;
+    white-space: nowrap;
+  }
+
+  .stream .tx {
+    flex: 1 1 0;
+    min-width: 0;
+  }
+
+  .stream .chip,
+  .stream .nochip { flex: none; }
+}
 
 /* -- asks -- */
 
