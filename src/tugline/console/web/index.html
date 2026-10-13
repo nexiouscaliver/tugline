@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>tug console</title>
+<style>
+body { background: #11151a; color: #c7d0d9; font-family: monospace; margin: 2rem; }
+h1 { font-size: 1.1rem; }
+p { color: #7f8b97; }
+pre { white-space: pre-wrap; word-break: break-word; }
+</style>
+</head>
+<body>
+<h1>tug console</h1>
+<p>placeholder page for this wave: raw state below.</p>
+<pre id="state">loading...</pre>
+<script>
+fetch("/api/state").then(function (r) { return r.json(); }).then(function (s) {
+  document.getElementById("state").textContent = JSON.stringify(s, null, 2);
+}).catch(function (e) {
+  document.getElementById("state").textContent = "state unavailable: " + e;
+});
+</script>
+</body>
+</html>
