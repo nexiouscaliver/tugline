@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-13
+
 ### Changed
 
 - Notification titles and bodies now carry session context: titles read
@@ -40,6 +42,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - One `flush pass: scanned/handled/published/marked/suppressed` summary
   log line per flush pass (empty passes included), so an idle or starved
   flush is visible in the daemon log instead of silent.
+- Session store: a sqlite database under `<home>/store/tugline.db` that
+  folds the spool into sessions, events, and approval threads, with a
+  tailer ingesting on a fixed interval and refreshing delivery state and
+  thread status; ingest is idempotent against records already stored.
+- Console HTTP API with server-sent events: state, sessions, events,
+  threads, and replies reads, reply and approval writes, one `snapshot`
+  event on connect and a `delta` after each ingest pass.
+- Console web UI: sessions with running, waiting, and done states, the
+  live event stream with delivery chips, open asks with Approve and
+  Deny, a reply box with an explicit target, and header health; one
+  page, no external assets.
+- `tug console`: serves the console on 127.0.0.1 behind the
+  `[toggles] console` switch (default on) and `[server] console_port`
+  (default 2588, 0 picks a free port).
+- `TUGLINE_HOME`: one environment variable moves the whole tree (spool,
+  state, logs, store, replies).
+- Shared approval file helper: one module for the pending markers and
+  decision files, so the adapters, the approve receiver, and the console
+  cannot drift apart on payload shape or write discipline.
+- Hook records carry adapter, project, and cwd session fields through to
+  events and sessions in the store.
+- Event queries are ordered by timestamp with an id tiebreak, so spool
+  records that arrive out of order still read chronologically.
 
 ## [0.1.0] - 2026-10-13
 
