@@ -161,7 +161,11 @@ def test_flagged_record_carries_approve_and_deny_buttons(tug_home):
     clock = FakeClock()
     decide_file(tug_home, "app7", {"decision": "allow"})
     request(
-        {"tool_name": "Bash", "tool_input": {"command": "git push"}},
+        {
+            "tool_name": "Bash",
+            "tool_input": {"command": "git push"},
+            "cwd": "/Users/shahil/work/tugline",
+        },
         make_config(),
         tug_home,
         clock,
@@ -171,7 +175,10 @@ def test_flagged_record_carries_approve_and_deny_buttons(tug_home):
     assert len(records) == 1
     record = records[0]
     assert record["event"] == "permissionrequest"
-    assert record["title"] == "claude permission request"
+    assert record["title"] == "[claude] tugline - waiting for your input"
+    assert record["body"] == (
+        'session s-4f2a, permission: Bash {"command":"git push"}'
+    )
     labels = [action["label"] for action in record["actions"]]
     assert labels == ["Approve", "Deny"]
     assert all(action["method"] == "POST" for action in record["actions"])
@@ -224,8 +231,9 @@ def test_tool_input_summary_is_compact_and_bounded(tug_home):
     payload = {"tool_name": "Bash", "tool_input": {"command": "x" * 5000}}
     request(payload, make_config(), tug_home, clock, approve_id="app11")
     record = spooled(tug_home)[0]
-    assert record["body"].startswith("Bash ")
-    assert len(record["body"]) <= 205
+    prefix = "session s-4f2a, permission: Bash "
+    assert record["body"].startswith(prefix)
+    assert len(record["body"]) - len(prefix) <= 200
 
 
 def test_wait_stops_at_the_300s_hard_cap_in_the_loop(tug_home):
