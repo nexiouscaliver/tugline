@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Daemon flush path: a healthy ntfy reply stream never ended on its own
+  (keepalive events every 45s reset the read timeout), so the serve loop
+  never returned to flush and every record queued after daemon start sat
+  undelivered. Each stream pass is now bounded by a flush interval
+  (default 5s, deadline checked per line), so the spool flushes at least
+  every 10 seconds even while the stream is held open.
+
+### Added
+
+- One `flush pass: scanned/handled/published/marked/suppressed` summary
+  log line per flush pass (empty passes included), so an idle or starved
+  flush is visible in the daemon log instead of silent.
+
 ## [0.1.0] - 2026-10-13
 
 ### Added

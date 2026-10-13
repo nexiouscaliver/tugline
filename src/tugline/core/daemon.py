@@ -25,6 +25,19 @@ bucket full). A held stream satisfies that trivially; a failed stream
 open falls back to a single bounded poll on the same floor. A tight
 poll loop would 429 within a minute.
 
+Starvation guard: one daemon thread runs flush and the reply pass in
+turn, so a reply stream that never ends would starve the spool. ntfy
+keeps healthy streams alive with keepalive events every 45 seconds,
+and every arriving line resets the read timeout; the live daemon
+(2026-10-13) sat in one hold for twelve hours while 120 queued records
+went undelivered. Each stream pass is therefore bounded by
+flush_interval seconds (default 5): the connection's read timeout is
+capped at the same value, and the read loop watches a monotonic
+deadline so even a busy keepalive stream returns to the serve loop,
+which flushes at least every 10 seconds. Reconnecting on that cadence
+(one request per flush_interval + poll_floor, worst case) still stays
+under the one-token-per-5-seconds replenishment.
+
 A bad record never takes the daemon down: one log line, keep going.
 SIGTERM exits the loop cleanly. --once runs a single cycle.
 """
@@ -61,6 +74,7 @@ class Daemon:
         poll_timeout=45.0,
         stream_timeout=120.0,
         poll_floor=6.0,
+        flush_interval=5.0,
         cycle_idle=0.5,
         backoff_base=1.0,
         backoff_cap=30.0,
@@ -81,6 +95,7 @@ class Daemon:
         self.poll_timeout = poll_timeout
         self.stream_timeout = stream_timeout
         self.poll_floor = poll_floor
+        self.flush_interval = flush_interval
         self.cycle_idle = cycle_idle
         self.backoff_base = backoff_base
         self.backoff_cap = backoff_cap
@@ -98,26 +113,48 @@ class Daemon:
     # -- spool flush --
 
     def flush(self) -> int:
-        """Handle every undelivered record once. Returns handled count."""
+        """Handle every undelivered record once. Returns handled count.
+
+        Every pass logs one summary line (scanned/handled/published/
+        marked/suppressed) so a silently idle or starving flush is
+        visible in daemon.err.log (the live 2026-10-13 failure hid
+        behind exactly that silence)."""
         handled = 0
         misses = 0
+        scanned = 0
+        published = 0
+        suppressed = 0
         for record in spool.undelivered(self.spool_root, on_error=self.log):
+            scanned += 1
             try:
-                ok = self._handle(record)
+                ok, published_now = self._handle(record)
             except Exception as exc:  # one bad record, one line, move on
                 self.log("record %s skipped: %s" % (record.get("id"), exc))
                 continue
             if ok:
                 handled += 1
+                if published_now:
+                    published += 1
+                else:
+                    suppressed += 1
                 misses = 0
             else:
                 misses += 1
                 if misses >= 3:
                     self.log("flush pausing after repeated publish failures")
                     break
+        self.log(
+            "flush pass: scanned=%d handled=%d published=%d marked=%d "
+            "suppressed=%d"
+            % (scanned, handled, published, handled, suppressed)
+        )
         return handled
 
-    def _handle(self, record) -> bool:
+    def _handle(self, record):
+        """Decide and finish one record. Returns (ok, published): ok is
+        True when the record was marked handled (published or consumed
+        as suppressed/state), published is True when a notification
+        actually went out."""
         if not record.get("id"):
             raise ValueError("record without id")
         name = _record_event(record)
@@ -127,7 +164,7 @@ class Daemon:
         if name == "userpromptsubmit":
             policy.record_prompt(session_id, ts_epoch, self.state_root)
             self._mark(record)
-            return True
+            return True, False
 
         turn_seconds = None
         if name == "stop":
@@ -150,12 +187,12 @@ class Daemon:
         if decision.action == "publish" and self.config.toggles.notify:
             topic = topics.resolve(decision.topic, self.config)
             if not self._publish_with_retry(topic, record, decision, name):
-                return False
+                return False, False
 
         self._mark(record)
         if name == "stop" and session_id:
             policy.disarm(session_id, self.state_root)
-        return True
+        return True, decision.action == "publish" and self.config.toggles.notify
 
     def _publish_with_retry(self, topic, record, decision, event_name) -> bool:
         delay = self.backoff_base
@@ -188,15 +225,20 @@ class Daemon:
     # -- reply streaming --
 
     def stream_replies(self) -> int:
-        """Hold the reply stream open and capture messages as they arrive.
+        """Hold the reply stream open (bounded) and capture messages.
 
         Opens {server}/{reply-topic}/json?since={cursor} as a streaming
         GET and reads it line by line, saving the cursor after every
-        message, until the server closes it or the read timeout (120s
-        by default) passes; the caller then reconnects with the same
-        cursor. Returns the number of messages captured. stream_status
-        says "held" once the stream was established and "error" when it
-        could not be opened at all (the poll fallback path).
+        message, until the server closes it, the read timeout passes,
+        or the flush_interval deadline ends the pass; the caller then
+        reconnects with the same cursor. The pass is bounded because a
+        healthy ntfy stream never ends on its own: keepalive events
+        arrive every 45 seconds and reset the read timeout, so without
+        a deadline the serve loop would never return to flush (the
+        live 2026-10-13 starvation). Returns the number of messages
+        captured. stream_status says "held" once the stream was
+        established and "error" when it could not be opened at all (the
+        poll fallback path).
         """
         self.stream_status = "held"
         if not self.config.toggles.replies:
@@ -216,7 +258,12 @@ class Daemon:
 
     def _open_stream(self, base, topic, since):
         """Open one stream; returns (captured, error_code). count is
-        None only when the stream could not be established."""
+        None only when the stream could not be established.
+
+        The connection timeout is the stream timeout capped at the
+        flush interval: a hung connect or a quiet stream must hand
+        control back to the serve loop within the flush bound, not
+        after stream_timeout (120s) seconds."""
         url = "%s/%s/json?since=%s" % (
             base,
             urllib.parse.quote(topic),
@@ -229,7 +276,7 @@ class Daemon:
         request = urllib.request.Request(url, headers=headers, method="GET")
         try:
             with urllib.request.urlopen(
-                request, timeout=self.stream_timeout
+                request, timeout=min(self.stream_timeout, self.flush_interval)
             ) as resp:
                 return self._read_stream_lines(resp, topic), None
         except urllib.error.HTTPError as exc:
@@ -242,10 +289,22 @@ class Daemon:
             return None, None
 
     def _read_stream_lines(self, resp, topic) -> int:
+        """Read one bounded stream pass.
+
+        The pass ends at the server close, at the read timeout (capped
+        at flush_interval), or at the flush_interval deadline, checked
+        after every line so that keepalive traffic (which resets the
+        read timeout) cannot extend the pass past the bound. After a
+        read timeout the socket is poisoned ("cannot read from timed
+        out object"), so the pass ends rather than retrying the read;
+        the caller paces and reconnects with the saved cursor."""
         count = 0
+        deadline = self._now() + self.flush_interval
         try:
             for raw_line in resp:
                 if self._stop:
+                    break
+                if self._now() >= deadline:
                     break
                 line = raw_line.strip()
                 if not line:
@@ -379,9 +438,8 @@ class Daemon:
 
         ntfy replenishes one request token every 5 seconds; a 6 second
         floor keeps the visitor bucket full no matter what the server
-        does. A held stream blows through the floor naturally (one
-        request outlives it), so the sleep only happens after short or
-        failed streams.
+        does. Bounded stream passes that outlive the floor need no
+        sleep; the floor bites after short passes and failed streams.
         """
         now = self._now()
         if self._next_reply_request_at is not None and now < self._next_reply_request_at:
@@ -389,7 +447,8 @@ class Daemon:
         self._next_reply_request_at = self._now() + self.poll_floor
 
     def _replies_cycle(self):
-        """One reply pass: hold the stream, poll only if it errors."""
+        """One bounded reply pass: hold the stream (never longer than
+        flush_interval), poll only if it errors."""
         self._pace_reply_request()
         self.stream_replies()
         if self.stream_status == "error":
@@ -397,7 +456,12 @@ class Daemon:
             self.poll_replies()
 
     def serve(self):
-        """Run cycles until SIGTERM (or a stop request) lands."""
+        """Run cycles until SIGTERM (or a stop request) lands.
+
+        Each cycle flushes the spool first, then runs one bounded reply
+        pass, so the loop returns to flush at least every
+        flush_interval (plus pacing) seconds even while the reply
+        stream is healthy and held open."""
         self._install_signal_handlers()
         if self.config.toggles.approve:
             self.start_approve_receiver()
