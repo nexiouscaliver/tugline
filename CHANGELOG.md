@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Unread operator replies now reach running sessions on every prompt:
+  the zcode and Claude Code adapters handle `UserPromptSubmit` (the
+  installers register the event, appending to existing installs
+  without touching the already-wired events), and before the prompt
+  is spooled the hook reads unconsumed replies from
+  `~/.tugline/replies.jsonl`, prefers the ones the console store
+  binds to that session, falls back to all unread, emits them through
+  the harness context channel (one `additionalContext` JSON object on
+  stdout), and marks what it injected `consumed` in the journal.
+  Every reply read is bounded and best effort; any failure degrades
+  silently to the previous behavior (no injection, exit 0) and never
+  blocks the prompt.
 - Operator session labels in the console: `PUT
   /api/sessions/<id>/label` sets or clears a plain-text label (max 60
   characters, trimmed; empty clears), stored in a new nullable
@@ -28,6 +40,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   current session list (the full id in the worst case), so sessions
   sharing a tail never render the same short id anywhere on the
   page.
+
+### Changed
+
+- The daemon reply leg now makes exactly one request per cycle: while
+  the streaming subscribe connects, the poll fallback never runs, and
+  when the stream errors the cycle spends its single request on the
+  poll, reconnecting the stream on the next cycle after a quiet poll.
+  The stream open and the poll no longer share a cycle, keeping the
+  combined reply request rate under ntfy's one-token-per-5-seconds
+  replenishment even while the server is rate limiting the visitor.
 
 ### Security
 

@@ -73,6 +73,7 @@ def test_tug_install_zcode_dispatches(tmp_path, env):
         "SessionStart",
         "Stop",
         "PermissionRequest",
+        "UserPromptSubmit",
     }
 
 

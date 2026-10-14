@@ -15,8 +15,9 @@ removes exactly the entries carrying it.
 
 The write path is: parse the file, append our groups, back up the
 previous bytes under a timestamped sibling, then swap the new file in
-with one atomic rename. A second install run finds its own marker and
-refuses to touch the file again.
+with one atomic rename. Install is idempotent per event: a second run
+finds its own markers and appends only events still missing (so an
+upgrade that wires a new event composes with an existing install).
 
 The dump format is fixed (indent 2, UTF-8, one trailing newline), so
 a settings file already in that format survives an install plus
@@ -37,8 +38,11 @@ BACKUP_INFIX = ".tugline-"
 # Wired events and their hook timeouts in seconds. PermissionRequest
 # waits on a phone decision bounded by the approve hard cap (300 s)
 # plus margin; everything else answers in well under a second.
+# UserPromptSubmit (W7-L17) delivers unread operator replies into the
+# running session on every prompt.
 HOOK_EVENTS = {
     "SessionStart": 20,
+    "UserPromptSubmit": 20,
     "Stop": 20,
     "Notification": 20,
     "PermissionRequest": 320,
@@ -134,8 +138,11 @@ def write_settings(path, data) -> None:
 def install(settings_path=None, command="tug", now=None, warn_stream=None) -> dict:
     """Append tugline hook entries to the Claude Code settings.
 
-    Refuses (without writing) when tugline entries are already there.
-    Warns once that already-running sessions keep their old hooks.
+    Idempotent per event (append-only installer discipline): events
+    that already carry a tugline entry are left alone, missing ones
+    are appended, and nothing is written when every event is already
+    wired. Warns once that already-running sessions keep their old
+    hooks.
     """
     path = resolve_path(settings_path)
     existed = os.path.exists(path)
@@ -152,7 +159,8 @@ def install(settings_path=None, command="tug", now=None, warn_stream=None) -> di
         raise SettingsError('settings "hooks" must be an object: %s' % (path,))
 
     already = marked_events(data)
-    if already:
+    needed = [event for event in HOOK_EVENTS if event not in already]
+    if not needed:
         return {
             "status": "already-installed",
             "changed": False,
@@ -161,7 +169,8 @@ def install(settings_path=None, command="tug", now=None, warn_stream=None) -> di
             "events": sorted(already),
         }
 
-    for event, timeout in HOOK_EVENTS.items():
+    for event in needed:
+        timeout = HOOK_EVENTS[event]
         groups = hooks.get(event)
         if groups is None:
             groups = []
@@ -190,7 +199,7 @@ def install(settings_path=None, command="tug", now=None, warn_stream=None) -> di
         "changed": True,
         "path": path,
         "backup": backup,
-        "events": sorted(HOOK_EVENTS),
+        "events": sorted(set(already) | set(needed)),
     }
 
 

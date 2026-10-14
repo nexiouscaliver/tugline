@@ -19,6 +19,7 @@ from tugline.adapters.claude.install import MARKER
 
 WIRED_EVENTS = [
     "SessionStart",
+    "UserPromptSubmit",
     "Stop",
     "Notification",
     "PermissionRequest",
@@ -186,6 +187,88 @@ def test_permission_request_entry_carries_a_longer_timeout(settings_path):
     stop = data["hooks"]["Stop"][1]["hooks"][0]
     assert permission["timeout"] == 320
     assert stop["timeout"] == 20
+
+
+def test_userpromptsubmit_entry_is_registered(settings_path):
+    result = install_module.install(settings_path)
+    assert result["status"] == "installed"
+    data = json.loads(read(settings_path))
+    groups = data["hooks"]["UserPromptSubmit"]
+    assert len(groups) == 2  # the status tool's group plus tugline's
+    tug_hook = groups[1]["hooks"][0]
+    assert tug_hook["command"] == "tug hook-claude UserPromptSubmit # " + MARKER
+    assert tug_hook["timeout"] == 20
+
+
+def test_reinstall_over_a_four_event_config_appends_only_userpromptsubmit(
+    settings_path,
+):
+    """The live settings carry tugline entries for the four pre-W7-L17
+    events. The installer is append-only per event: it must add the
+    missing UserPromptSubmit group and leave every existing byte of
+    tugline and foreign wiring alone."""
+    settings_path.write_text(
+        json.dumps(_legacy_four_event_settings(), indent=2) + "\n",
+        encoding="utf-8",
+    )
+    before = read(settings_path)
+
+    result = install_module.install(settings_path)
+
+    assert result["status"] == "installed"
+    assert result["changed"] is True
+    data = json.loads(read(settings_path))
+    for event in ["SessionStart", "Stop", "Notification", "PermissionRequest"]:
+        assert len(data["hooks"][event]) == 2  # untouched foreign + tugline
+    assert len(data["hooks"]["UserPromptSubmit"]) == 2
+    second = install_module.install(settings_path)
+    assert second["status"] == "already-installed"
+    assert second["changed"] is False
+    assert read(settings_path) != before
+
+
+def _legacy_four_event_settings():
+    """Settings exactly as the live host had them before W7-L17: every
+    event routed to the status tool, tugline appended to the four
+    pre-W7-L17 events, nothing on UserPromptSubmit beyond the status
+    tool."""
+    hooks = {}
+    for event in [
+        "SessionStart",
+        "UserPromptSubmit",
+        "Stop",
+        "SubagentStop",
+        "Notification",
+        "PermissionRequest",
+        "PreToolUse",
+        "PostToolUse",
+        "PreCompact",
+        "SessionEnd",
+    ]:
+        hooks[event] = [
+            {
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": "/Users/shahil/.config/iterm2/cc-status %s"
+                        % event.lower(),
+                    }
+                ]
+            }
+        ]
+    for event in ["SessionStart", "Stop", "Notification", "PermissionRequest"]:
+        hooks[event].append(
+            {
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": "tug hook-claude %s # %s" % (event, MARKER),
+                        "timeout": 20,
+                    }
+                ]
+            }
+        )
+    return {"permissions": {"allow": []}, "model": "sonnet", "hooks": hooks}
 
 
 def test_install_command_override_lands_in_every_entry(tmp_path):

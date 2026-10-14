@@ -34,8 +34,13 @@ import time
 from tugline.adapters.zcode import jsonspans
 
 MARKER = "tugline:zcode"
-EVENTS = ("SessionStart", "Stop", "PermissionRequest")
-TIMEOUTS = {"SessionStart": 10, "Stop": 10, "PermissionRequest": 310}
+EVENTS = ("SessionStart", "Stop", "PermissionRequest", "UserPromptSubmit")
+TIMEOUTS = {
+    "SessionStart": 10,
+    "Stop": 10,
+    "PermissionRequest": 310,
+    "UserPromptSubmit": 10,
+}
 DEFAULT_CONFIG = os.path.join("~", ".zcode", "cli", "config.json")
 BACKUP_GLOB_SUFFIX = ".tugline-bak-"
 

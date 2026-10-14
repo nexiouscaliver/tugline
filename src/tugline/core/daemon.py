@@ -21,9 +21,11 @@ Single-threaded loop:
 Rate posture: ntfy's default visitor limits are a burst of 60 requests
 replenishing one token every 5 seconds, so the daemon makes at most
 one reply request per poll_floor seconds (default 6, which keeps the
-bucket full). A held stream satisfies that trivially; a failed stream
-open falls back to a single bounded poll on the same floor. A tight
-poll loop would 429 within a minute.
+bucket full). A held stream satisfies that trivially; the poll
+fallback runs only while the stream cannot be established, as the
+cycle's single request (the stream open and the poll never share a
+cycle, so a rate-limited server is never handed two requests per
+cycle). A tight poll loop would 429 within a minute.
 
 Starvation guard: one daemon thread runs flush and the reply pass in
 turn, so a reply stream that never ends would starve the spool. ntfy
@@ -447,13 +449,27 @@ class Daemon:
         self._next_reply_request_at = self._now() + self.poll_floor
 
     def _replies_cycle(self):
-        """One bounded reply pass: hold the stream (never longer than
-        flush_interval), poll only if it errors."""
+        """One bounded reply pass, exactly one request per cycle.
+
+        One subscription path at a time: while the stream connects,
+        the cycle's single request is the streaming subscribe and the
+        poll fallback never runs. When the stream errored, the cycle
+        spends its single request on the poll instead; once a poll
+        comes back quiet (nothing captured), the next cycle spends its
+        request on reconnecting the stream. The stream open and the
+        poll therefore never share a cycle, and every reply request
+        stands a full poll_floor from the previous one, keeping the
+        combined request rate under ntfy's one-token-per-5-seconds
+        replenishment even while the server rate limits us."""
         self._pace_reply_request()
-        self.stream_replies()
         if self.stream_status == "error":
-            self._pace_reply_request()
-            self.poll_replies()
+            captured = self.poll_replies()
+            if not captured:
+                # quiet poll: reconnect the stream with the next
+                # cycle's single request instead of polling again
+                self.stream_status = None
+            return
+        self.stream_replies()
 
     def serve(self):
         """Run cycles until SIGTERM (or a stop request) lands.

@@ -21,13 +21,20 @@ on stdin. This module is the tugline side of that contract:
   finished", body leading "session <short6>") unless the
   [toggles] context_titles switch is off, which restores the exact
   strings from before the enrichment,
-- keep stdout EMPTY unless a permission decision is being returned,
+- UserPromptSubmit injects unread operator replies into the session
+  through Claude Code's documented context channel (one JSON object
+  with hookSpecificOutput.additionalContext on stdout), so a running
+  session sees replies without waiting for a resume,
+- keep stdout EMPTY unless a permission decision is being returned or
+  replies are being injected,
 - log exactly one line per run under ~/.tugline/logs/.
 
 Every failure path is fail closed: log one line, exit 0, print
 nothing. A hook that prints no decision falls through to Claude
 Code's local permission prompt, which is exactly the behavior wanted
-when anything is broken. Nothing here ever raises to the caller.
+when anything is broken. A reply read that fails in any way degrades
+to today's behavior (no injection, exit 0). Nothing here ever raises
+to the caller.
 """
 
 from __future__ import annotations
@@ -36,7 +43,9 @@ import argparse
 import json
 import os
 import select
+import sqlite3
 import sys
+import urllib.request
 from datetime import datetime, timezone
 
 from tugline.adapters.claude import approve, paths
@@ -45,6 +54,14 @@ from tugline.core import spool
 from tugline.core.config import ConfigError, load_config
 
 STDIN_CEILING = 2.0
+
+# Reply injection bounds: the hook runs inline on every prompt, so
+# every read is bounded and best effort (journal tail only, read-only
+# store probe with a tiny busy timeout, nothing may block).
+REPLY_TAIL_BYTES = 65536
+REPLY_MAX_INJECTED = 5
+REPLY_BODY_CHARS = 200
+REPLY_STORE_TIMEOUT_S = 0.05
 
 
 class _HookEventAction(argparse.Action):
@@ -190,6 +207,174 @@ def _adapter_extra(normalized):
     return {"adapter": "claude", "cwd": cwd, "project": project}
 
 
+# -- reply injection (UserPromptSubmit) --
+
+
+def _unread_replies(home):
+    """Unconsumed journal entries, in file order, from a bounded tail.
+
+    Both reply writers (the daemon's ntfy capture and the console)
+    append one line each to <home>/replies.jsonl with consumed=false.
+    Reading is capped at the last REPLY_TAIL_BYTES so a long-lived
+    journal cannot slow the prompt; anything older is long consumed.
+    """
+    path = os.path.join(str(home), "replies.jsonl")
+    try:
+        size = os.path.getsize(path)
+        with open(path, encoding="utf-8") as fh:
+            if size > REPLY_TAIL_BYTES:
+                fh.seek(size - REPLY_TAIL_BYTES)
+                fh.readline()  # drop the possibly partial line
+            text = fh.read()
+    except OSError:
+        return []
+    entries = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(entry, dict) and not entry.get("consumed"):
+            entries.append(entry)
+    return entries
+
+
+def _bound_reply_pairs(home, session_id):
+    """(ts, body) pairs of store replies aimed at this session.
+
+    The console binds every reply it writes to a thread's session; the
+    store is the only place that binding lives. This probe is
+    read-only with a tiny busy timeout, and any problem (no store,
+    busy store, broken store) simply yields no binding so the caller
+    falls back to all unread replies.
+    """
+    if not session_id:
+        return set()
+    path = os.path.join(str(home), "store", "tugline.db")
+    if not os.path.exists(path):
+        return set()
+    try:
+        uri = "file:%s?mode=ro" % urllib.request.pathname2url(path)
+        conn = sqlite3.connect(uri, uri=True, timeout=REPLY_STORE_TIMEOUT_S)
+        try:
+            rows = conn.execute(
+                "SELECT ts, body FROM replies"
+                " WHERE session_id = ? AND delivered = 0",
+                (str(session_id),),
+            ).fetchall()
+        finally:
+            conn.close()
+    except (OSError, ValueError, sqlite3.Error):
+        return set()
+    return {(str(row[0]), str(row[1])) for row in rows}
+
+
+def _reply_context(entries):
+    """The additionalContext text for the chosen replies."""
+    lines = [
+        "tugline: %d unread repl%s from the operator (oldest first):"
+        % (len(entries), "y" if len(entries) == 1 else "ies")
+    ]
+    for entry in entries:
+        body = str(entry.get("body") or "").strip() or "(empty reply)"
+        if len(body) > REPLY_BODY_CHARS:
+            body = body[:REPLY_BODY_CHARS] + "..."
+        label = str(entry.get("source") or entry.get("title") or "reply")
+        lines.append("- [%s] %s" % (label, body))
+    return "\n".join(lines)
+
+
+def _mark_replies_consumed(home, chosen):
+    """Flip consumed=true for the injected entries, atomically.
+
+    The journal has two unsynchronized appenders (daemon and console),
+    so the rewrite re-checks the file size and retries once when an
+    append landed mid-read; if the journal keeps moving the marking is
+    skipped (worst case: the reply injects again next prompt). Every
+    other byte of the journal passes through unchanged.
+    """
+    path = os.path.join(str(home), "replies.jsonl")
+    ids = {entry.get("id") for entry in chosen if entry.get("id")}
+    if not ids:
+        return
+    for _ in range(2):
+        try:
+            with open(path, "rb") as fh:
+                raw = fh.read()
+            size = len(raw)
+            out_lines = []
+            for line in raw.decode("utf-8", "replace").splitlines(keepends=True):
+                stripped = line.strip()
+                if stripped:
+                    try:
+                        entry = json.loads(stripped)
+                    except ValueError:
+                        entry = None
+                    if (
+                        isinstance(entry, dict)
+                        and entry.get("id") in ids
+                        and not entry.get("consumed")
+                    ):
+                        entry["consumed"] = True
+                        line = json.dumps(entry, separators=(",", ":")) + "\n"
+                out_lines.append(line)
+            if os.path.getsize(path) != size:
+                continue  # an appender moved the journal; re-read
+            tmp = path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as fh:
+                fh.write("".join(out_lines))
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(tmp, path)
+            return
+        except OSError:
+            return
+
+
+def _emit_unread_replies(session) -> int:
+    """Inject unread replies into the session. Returns the count.
+
+    Best effort by contract: replies bound to this session (through
+    the store) are preferred; with none bound, all unread replies are
+    injected. The output is Claude Code's documented UserPromptSubmit
+    context shape, the injected entries are marked consumed in the
+    journal, and any failure along the way degrades to injecting
+    nothing rather than blocking the prompt.
+    """
+    home = paths.home_root()
+    try:
+        unread = _unread_replies(home)
+        if not unread:
+            return 0
+        bound = _bound_reply_pairs(home, session)
+        chosen = [
+            entry
+            for entry in unread
+            if (str(entry.get("ts") or ""), str(entry.get("body") or ""))
+            in bound
+        ]
+        if not chosen:
+            chosen = unread
+        chosen = chosen[-REPLY_MAX_INJECTED:]
+        if not chosen:
+            return 0
+        payload_out = {
+            "hookSpecificOutput": {
+                "hookEventName": "UserPromptSubmit",
+                "additionalContext": _reply_context(chosen),
+            }
+        }
+        sys.stdout.write(json.dumps(payload_out) + "\n")
+        sys.stdout.flush()
+        _mark_replies_consumed(home, chosen)
+        return len(chosen)
+    except Exception:  # never let a reply failure block the prompt
+        return 0
+
+
 def run_event(event_name, stdin=None) -> int:
     """Run one hook event. Never raises; always returns an exit code."""
     try:
@@ -293,6 +478,14 @@ def _run(event_name, stdin) -> int:
             sys.stdout.write(decision + "\n")
             sys.stdout.flush()
             _log(event, "decision returned")
+        return 0
+
+    if key == "userpromptsubmit":
+        injected = _emit_unread_replies(session)
+        if injected:
+            _log(event, "injected %d unread replies" % injected)
+        else:
+            _log(event, "prompt submitted, no unread replies")
         return 0
 
     _log(event, "event not wired")
