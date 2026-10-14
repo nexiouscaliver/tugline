@@ -721,6 +721,12 @@ function paintReplies() {
         ? "thread " + short8(reply.thread_nonce)
         : "session " + sid(reply.session_id);
       item.append(el("span", "tgt", target));
+      // wake state straight from the dispatcher journal: dispatched,
+      // finished, timed_out, unsupported, skipped. Absent (null) means
+      // no wake decision was ever recorded for this reply.
+      if (reply.wake && reply.wake.state) {
+        item.append(el("span", "wake-state wake-" + reply.wake.state, reply.wake.state));
+      }
       return item;
     })
   );

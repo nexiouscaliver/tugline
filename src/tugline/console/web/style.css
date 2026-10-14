@@ -630,6 +630,24 @@ textarea:disabled { opacity: 0.45; }
   white-space: nowrap;
 }
 
+/* wake state chip on a recent reply: what the dispatcher did with it
+   (dispatched, finished, timed_out, unsupported, skipped) */
+.recent .wake-state {
+  font-family: var(--mono);
+  font-size: 0.75rem;
+  white-space: nowrap;
+  padding: 0.05rem 0.4rem;
+  border-radius: 999px;
+  border: 1px solid var(--muted);
+  color: var(--muted);
+}
+
+.recent .wake-dispatched,
+.recent .wake-finished {
+  color: var(--fg);
+  border-color: var(--fg);
+}
+
 /* -- phones (max-width 719px): tabs, full text, whole-row targets --
    One panel is visible at a time above a fixed bottom tab bar (the
    only fixed element); the header status strip and the panel scroll

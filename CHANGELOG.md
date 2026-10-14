@@ -9,6 +9,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Wake-on-reply: a reply bound to a session that lands while the
+  session looks idle (its last spooled event a stop or a session
+  start) wakes it at once instead of waiting for the next turn
+  boundary. The daemon runs a wake dispatcher pass every cycle
+  (`tugline.core.wake`): it spawns the session adapter's driver with
+  the reply body as the prompt, resuming the session, with the cwd
+  taken from the store's session row. The claude driver command is
+  `claude --resume <session> -p "<body>"` (flag order verified
+  against `claude --help`, v2.1.299) and is config-driven through
+  `wake.claude_command`. Rails: one wake per reply id (deduped,
+  relearned from the journal on restart), one wake in flight per
+  session, a global concurrent cap (`wake.max_concurrent`, default
+  1), a per-wake timeout that kills the driver
+  (`wake.timeout_seconds`, default 1800), every decision and exit
+  journaled to `~/.tugline/state/wake.jsonl`, and the woken reply
+  marked consumed so the per-turn injection never double-delivers it.
+  `toggles.wake` (default on) restores the pre-wake behavior
+  exactly; `wake.dry_run` (default on) logs and journals the exact
+  command without spawning anything, to be flipped off after live
+  verification. Console reply lines now carry their session binding
+  (`session_id`), and the replies view shows a wake-state chip per
+  reply (dispatched, finished, timed_out, unsupported, skipped, or
+  none). Stated plainly: this change ships no zcode wake driver; the
+  ZCode app bundles a CLI (zcode.cjs v0.16.9) with documented
+  headless resume flags (-p, --resume, --cwd), and wiring that driver
+  is a queued follow-up lane. Until it lands, replies to idle zcode
+  sessions are journaled unsupported and stay queued for the session's
+  next-boundary injection. The daemon's `--once` cycle result gains a
+  `wakes` count.
 - Session tags, settable by the operator and by agents: a new `tags`
   table (schema version 4; existing stores migrate in place) holds up
   to 8 tags per session, each lowercase [a-z0-9-], at most 24
