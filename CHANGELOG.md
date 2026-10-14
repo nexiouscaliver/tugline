@@ -9,6 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Session tags, settable by the operator and by agents: a new `tags`
+  table (schema version 4; existing stores migrate in place) holds up
+  to 8 tags per session, each lowercase [a-z0-9-], at most 24
+  characters, normalized by dropping invalid characters. The console
+  gains `PUT` and `DELETE /api/sessions/<id>/tag/<tag>` (token-gated
+  like the label PUT) and renders tag chips on every session row with
+  an inline add editor and a remove x per chip; every session listing
+  (`/api/sessions`, `/api/state`) carries each row's tags.
+- Agent self-naming CLI: `tug label --session <id> <name>` (or
+  `--clear`), `tug tag --session <id> <tag>...`, `tug untag
+  --session <id> <tag>...`, and `tug sessions [--label X] [--tag Y]
+  [--json]` to list and filter. The session id is always an explicit
+  `--session` flag (no environment fallback); each command folds the
+  spool into the store once first, so it works on a fresh home with
+  no console running.
+- Reply targeting by name: the `session_id` field of `POST
+  /api/replies` now also accepts a label or a tag. Resolution order
+  is exact session id, then a label exactly one session carries, then
+  a tag exactly one session carries; an ambiguous label or tag is a
+  400 whose `sessions` key lists every matching session id so the
+  caller can show the choice. The reply box keeps showing the
+  resolved target before send, label first, short id second.
 - Unread operator replies now reach running sessions on every prompt:
   the zcode and Claude Code adapters handle `UserPromptSubmit` (the
   installers register the event, appending to existing installs
@@ -43,6 +65,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `POST /api/replies` with a `session_id` that matches no session,
+  label, or tag is now a 404 instead of silently recording a reply
+  row for an unknown session: name resolution means a typo can no
+  longer produce an undeliverable reply.
 - The daemon reply leg now makes exactly one request per cycle: while
   the streaming subscribe connects, the poll fallback never runs, and
   when the stream errors the cycle spends its single request on the
