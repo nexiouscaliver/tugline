@@ -341,14 +341,22 @@ function tagChips(session) {
     remove.type = "button";
     remove.title = "remove tag " + tag;
     remove.setAttribute("aria-label", "remove tag " + tag);
-    remove.addEventListener("click", () => removeTag(session, tag));
+    remove.addEventListener("click", (event) => {
+      // stop the bubble so the phone card tap never selects too
+      event.stopPropagation();
+      removeTag(session, tag);
+    });
     chip.append(remove);
     line.append(chip);
   }
   const add = el("button", "linkish tagadd", "tag");
   add.type = "button";
   add.title = "add a tag to this session";
-  add.addEventListener("click", () => startAddTag(session, line));
+  add.addEventListener("click", (event) => {
+    // stop the bubble so the phone card tap never selects the session
+    event.stopPropagation();
+    startAddTag(session, line);
+  });
   line.append(add);
   return line;
 }
@@ -362,7 +370,11 @@ function startAddTag(session, line) {
   input.className = "rename-input tag-input";
   input.maxLength = 24;
   input.placeholder = "tag (a-z, 0-9, -)";
+  // taps inside the editor must not bubble into the phone card
+  // handler, which would repaint the table and close this editor
+  input.addEventListener("click", (event) => event.stopPropagation());
   const hint = el("span", "taghint", "enter adds, esc cancels");
+  hint.addEventListener("click", (event) => event.stopPropagation());
   line.replaceChildren(input, hint);
   input.focus();
   let settled = false;
