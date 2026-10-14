@@ -21,6 +21,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Every reply read is bounded and best effort; any failure degrades
   silently to the previous behavior (no injection, exit 0) and never
   blocks the prompt.
+- Operator session labels in the console: `PUT
+  /api/sessions/<id>/label` sets or clears a plain-text label (max 60
+  characters, trimmed; empty clears), stored in a new nullable
+  `label` column on the sessions table (schema version 3; existing
+  stores migrate in place). The page carries a rename affordance on
+  every session row and shows the label as the row's primary name,
+  with the short id secondary.
+- Honest session liveness in the console: display state is derived
+  per response from recency, not just the last event. last_seen
+  within 5 minutes reads "active now"; a running session silent for
+  more than 30 minutes decays to "idle"; stop stays "done" and an
+  open permissionrequest stays "waiting on me" at any age. The
+  sessions panel sorts active-now first, then by recency. The store
+  keeps raw facts; nothing is rewritten.
+- Collision-proof session ids in the console: short ids are computed
+  per response as suffixes lengthened until unique within the
+  current session list (the full id in the worst case), so sessions
+  sharing a tail never render the same short id anywhere on the
+  page.
 
 ### Changed
 

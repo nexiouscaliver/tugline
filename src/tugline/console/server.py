@@ -34,12 +34,14 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 from tugline.console.ingest import IngestThread, daemon_health, ntfy_health
+from tugline.console.view import decorate_sessions
 from tugline.core import approval_files, spool
 
 DEFAULT_PORT = 2588
 SSE_PING_SECONDS = 15.0
 REPLY_LINE_LIMIT = 4096
 REPLY_TITLE = "console reply"
+LABEL_MAX_CHARS = 60
 _NONCE = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
 _WEB_NAME = re.compile(r"^[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)?$")
 _WEB_TYPES = {
@@ -77,6 +79,9 @@ class _Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         self._route("POST")
+
+    def do_PUT(self):
+        self._route("PUT")
 
     def _route(self, method):
         console = self.server.console
@@ -233,6 +238,8 @@ class ConsoleServer:
             return self._get(name, segments, query)
         if method == "POST":
             return self._post(name, segments, query, body)
+        if method == "PUT":
+            return self._put(name, segments, query, body)
         return 404, {"error": "unknown endpoint"}
 
     def auth_denied(self, headers, query):
@@ -289,7 +296,7 @@ class ConsoleServer:
         if name == "state" and len(segments) == 2:
             return 200, self.state_payload()
         if name == "sessions" and len(segments) == 2:
-            return 200, {"sessions": self.store.sessions()}
+            return 200, {"sessions": self._sessions_view()}
         if name == "events" and len(segments) == 2:
             limit = _int_param(query, "limit", 50)
             if limit is None:
@@ -312,6 +319,43 @@ class ConsoleServer:
         if name == "approvals" and len(segments) == 3:
             return self._post_approval(segments[2], query)
         return 404, {"error": "unknown endpoint"}
+
+    def _put(self, name, segments, query, body):
+        if (
+            name == "sessions"
+            and len(segments) == 4
+            and segments[3] == "label"
+        ):
+            return self._put_session_label(segments[2], body)
+        return 404, {"error": "unknown endpoint"}
+
+    def _put_session_label(self, session_id, body):
+        """Set or clear one session's operator label.
+
+        The body must be a JSON object with a string label: plain
+        text (no control characters), trimmed, at most 60 characters;
+        an empty label clears it. Unknown sessions are a 404.
+        """
+        try:
+            data = json.loads(body.decode("utf-8"))
+        except (ValueError, UnicodeDecodeError):
+            return 400, {"error": "body must be json"}
+        if not isinstance(data, dict) or not isinstance(
+            data.get("label"), str
+        ):
+            return 400, {"error": "label must be a string"}
+        label = data["label"].strip()
+        if len(label) > LABEL_MAX_CHARS:
+            return 400, {
+                "error": "label must be at most %d characters" % LABEL_MAX_CHARS
+            }
+        if any(ord(ch) < 32 or ord(ch) == 127 for ch in label):
+            return 400, {"error": "label must be plain text"}
+        try:
+            row = self.store.set_session_label(session_id, label)
+        except KeyError:
+            return 404, {"error": "unknown session"}
+        return 200, {"ok": True, "session": row}
 
     def _post_reply(self, body):
         try:
@@ -368,10 +412,16 @@ class ConsoleServer:
 
     # -- state and replies.jsonl --
 
+    def _sessions_view(self):
+        """Raw store rows dressed for display: honest liveness state,
+        collision-proof ids, active-now rows first."""
+        return decorate_sessions(self.store.sessions())
+
     def state_payload(self):
         """One read for a console render: the store snapshot plus
         health, spool depth, and when the ingest last ran."""
         payload = self.store.snapshot()
+        payload["sessions"] = decorate_sessions(payload["sessions"])
         health = daemon_health(self.spool_root)
         health["ntfy"] = ntfy_health(self.config)
         payload["health"] = health

@@ -275,6 +275,53 @@ tr.selected td { background: rgba(88, 166, 255, 0.09); }
 
 tr.selected .idlink { color: var(--accent); }
 
+/* session identity: the operator label is the primary name, the
+   collision-proof short id sits beneath it, and the rename link
+   opens an inline editor in the same cell */
+.idwrap {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.1rem;
+  min-width: 0;
+}
+
+.idwrap .idlink.session-name {
+  max-width: 16rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-family: var(--sans);
+  font-weight: 600;
+}
+
+.idsub {
+  font-family: var(--mono);
+  font-size: 0.78rem;
+  color: var(--muted);
+  max-width: 16rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.idwrap .rename {
+  font-size: 0.75rem;
+  color: var(--muted);
+}
+
+.idwrap .rename:hover { color: var(--accent); }
+
+.rename-input {
+  width: 14rem;
+  max-width: 100%;
+  background: var(--bg);
+  border: 1px solid var(--accent);
+  border-radius: 2px;
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 0.85rem;
+  padding: 0.25rem 0.4rem;
+}
+
 .cell-badge { font-family: var(--mono); min-width: 6ch; color: var(--muted); }
 
 .cell-project,
