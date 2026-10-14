@@ -927,6 +927,9 @@ function setFilterChip(key) {
       chip.key === key
     );
   }
+  // keep the chosen chip visible when the row scrolls horizontally
+  const el = $("filter-chip-" + key);
+  if (el) el.scrollIntoView({ block: "nearest", inline: "center" });
   paintSessions();
 }
 

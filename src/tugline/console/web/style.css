@@ -412,8 +412,8 @@ tr.selected .idlink { color: var(--accent); }
 
 .fchip {
   flex: 0 0 auto;
-  min-height: 36px;
-  padding: 0.35rem 0.9rem;
+  min-height: 44px;
+  padding: 0.5rem 1rem;
   font-family: var(--mono);
   font-size: 0.85rem;
   line-height: 1;
