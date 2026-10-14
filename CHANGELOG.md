@@ -31,13 +31,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   verification. Console reply lines now carry their session binding
   (`session_id`), and the replies view shows a wake-state chip per
   reply (dispatched, finished, timed_out, unsupported, skipped, or
-  none). Stated plainly: this change ships no zcode wake driver; the
-  ZCode app bundles a CLI (zcode.cjs v0.16.9) with documented
-  headless resume flags (-p, --resume, --cwd), and wiring that driver
-  is a queued follow-up lane. Until it lands, replies to idle zcode
-  sessions are journaled unsupported and stay queued for the session's
-  next-boundary injection. The daemon's `--once` cycle result gains a
-  `wakes` count.
+  none). The daemon's `--once` cycle result gains a `wakes` count.
+- zcode wake driver: replies to idle zcode sessions wake them through
+  the CLI the ZCode desktop app bundles, spawned as `node
+  /Applications/ZCode.app/Contents/Resources/glm/zcode.cjs --resume
+  <session> -p "<body>" --cwd <project dir>`. Every flag was verified
+  against the bundled CLI's own help (v0.16.9): `-p, --prompt <text>`
+  runs a single prompt without opening the TUI, `--resume
+  <sessionId>` resumes a persisted session, `--cwd <path>` sets the
+  working directory; `--mode` is deliberately not passed because help
+  documents yolo as the default permission mode for `--prompt`, and
+  nothing is attached (the reply body is the whole prompt). The
+  command template is config-driven through `wake.zcode_command`, and
+  `wake.adapters` now defaults to `["claude", "zcode"]` (existing
+  configs that list adapters explicitly keep their list). The path is
+  the app-bundled CLI, so the driver is version-locked to the
+  installed ZCode app: if an app update moves the bundle, re-point
+  `wake.zcode_command`. An adapter with no driver entry (anything
+  but claude and zcode) is still journaled unsupported and stays
+  queued for the session's next-boundary injection.
 - Session tags, settable by the operator and by agents: a new `tags`
   table (schema version 4; existing stores migrate in place) holds up
   to 8 tags per session, each lowercase [a-z0-9-], at most 24
