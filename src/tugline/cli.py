@@ -63,6 +63,48 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("status", help="show service state, spool depth, last reply")
 
+    label = sub.add_parser(
+        "label", help="set or clear one session's display name"
+    )
+    label.add_argument(
+        "--session",
+        required=True,
+        help="session id to label (always explicit; no env fallback)",
+    )
+    label.add_argument("name", nargs="?", default=None, help="the label")
+    label.add_argument(
+        "--clear", action="store_true", help="clear the label instead"
+    )
+
+    tag = sub.add_parser(
+        "tag", help="attach one or more tags to a session"
+    )
+    tag.add_argument(
+        "--session",
+        required=True,
+        help="session id to tag (always explicit; no env fallback)",
+    )
+    tag.add_argument("tags", nargs="+", help="tags to attach")
+
+    untag = sub.add_parser(
+        "untag", help="detach one or more tags from a session"
+    )
+    untag.add_argument(
+        "--session",
+        required=True,
+        help="session id (always explicit; no env fallback)",
+    )
+    untag.add_argument("tags", nargs="+", help="tags to detach")
+
+    sessions = sub.add_parser(
+        "sessions", help="list sessions with label and tags (read-only)"
+    )
+    sessions.add_argument("--label", default=None, help="exact label filter")
+    sessions.add_argument("--tag", default=None, help="tag filter")
+    sessions.add_argument(
+        "--json", action="store_true", help="one JSON array instead of rows"
+    )
+
     daemon = sub.add_parser("daemon", help="flush the spool and poll for replies")
     daemon.add_argument(
         "--once", action="store_true", help="run a single cycle and exit"
@@ -107,6 +149,10 @@ def main(argv=None) -> int:
         "daemon": cmd_daemon,
         "console": cmd_console,
         "version": cmd_version,
+        "label": cmd_label,
+        "tag": cmd_tag,
+        "untag": cmd_untag,
+        "sessions": cmd_sessions,
     }
     return handlers[args.command](args)
 
@@ -247,6 +293,162 @@ def _last_reply():
         return json.loads(lines[-1])
     except ValueError:
         return None
+
+
+# -- session naming (labels and tags) --
+#
+# Agents know their own session id from context, but CLAUDE_SESSION_ID
+# is not exported to agent shells, so these commands never fall back
+# to the environment: the id is always an explicit --session flag.
+
+
+def _named_store():
+    """Open the store and fold the spool once.
+
+    The fold is the same idempotent pass the console runs on start,
+    so the commands work on a fresh home with no console running.
+    """
+    from tugline.core.store import Store
+
+    store = Store(paths.store_path())
+    store.ingest_spool(paths.spool_root())
+    return store
+
+
+def cmd_label(args) -> int:
+    if args.clear and args.name is not None:
+        print("give a label or --clear, not both", file=sys.stderr)
+        return 2
+    if not args.clear and not (args.name or "").strip():
+        print("give a label or --clear", file=sys.stderr)
+        return 2
+    store = _named_store()
+    try:
+        row = store.set_session_label(
+            args.session, args.name.strip() if args.name else ""
+        )
+    except KeyError:
+        print(
+            "unknown session: %s (sessions come from spooled hook"
+            " events)" % args.session,
+            file=sys.stderr,
+        )
+        return 2
+    finally:
+        store.close()
+    if args.clear or row["label"] is None:
+        print("label cleared: %s" % args.session)
+    else:
+        print("labeled %s: %s" % (args.session, row["label"]))
+    return 0
+
+
+def _tag_words(args) -> list:
+    """All requested tags normalized, validated up front so a bad one
+    never leaves a partial write behind."""
+    from tugline.core.store import (
+        TAG_MAX_CHARS,
+        normalize_tag,
+    )
+
+    words = []
+    for raw in args.tags:
+        tag = normalize_tag(raw)
+        if not tag:
+            print(
+                "not a tag: %r (lowercase letters, digits, hyphens)" % raw,
+                file=sys.stderr,
+            )
+            return []
+        if len(tag) > TAG_MAX_CHARS:
+            print(
+                "tag too long: %r (max %d characters)"
+                % (tag, TAG_MAX_CHARS),
+                file=sys.stderr,
+            )
+            return []
+        words.append(tag)
+    return words
+
+
+def cmd_tag(args) -> int:
+    words = _tag_words(args)
+    if not words:
+        return 2
+    store = _named_store()
+    try:
+        for word in words:
+            store.add_session_tag(args.session, word)
+    except KeyError:
+        print(
+            "unknown session: %s (sessions come from spooled hook"
+            " events)" % args.session,
+            file=sys.stderr,
+        )
+        return 2
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    finally:
+        store.close()
+    for word in words:
+        print("tagged %s: %s" % (args.session, word))
+    return 0
+
+
+def cmd_untag(args) -> int:
+    words = _tag_words(args)
+    if not words:
+        return 2
+    store = _named_store()
+    try:
+        for word in words:
+            store.remove_session_tag(args.session, word)
+    except KeyError:
+        print(
+            "unknown session: %s (sessions come from spooled hook"
+            " events)" % args.session,
+            file=sys.stderr,
+        )
+        return 2
+    finally:
+        store.close()
+    for word in words:
+        print("untagged %s: %s" % (args.session, word))
+    return 0
+
+
+def cmd_sessions(args) -> int:
+    from tugline.core.store import normalize_tag
+
+    store = _named_store()
+    try:
+        rows = store.sessions()
+        if args.label is not None:
+            rows = [r for r in rows if r.get("label") == args.label]
+        if args.tag is not None:
+            want = normalize_tag(args.tag)
+            rows = [r for r in rows if want in (r.get("tags") or [])]
+    finally:
+        store.close()
+    if args.json:
+        print(json.dumps(rows))
+        return 0
+    print("session\tlabel\ttags\tstate\tlast_seen")
+    for row in rows:
+        label = row.get("label") or "-"
+        tags = ",".join(row.get("tags") or []) or "-"
+        print(
+            "%s\t%s\t%s\t%s\t%s"
+            % (
+                row.get("session_id", ""),
+                label,
+                tags,
+                row.get("state", ""),
+                row.get("last_seen") or "",
+            )
+        )
+    return 0
 
 
 def cmd_daemon(args) -> int:

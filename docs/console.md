@@ -21,6 +21,16 @@ they happened.
   load to be unique: when two sessions would render the same tail,
   the id lengthens until they no longer collide (the full id in the
   worst case), so you never see two rows with the same short name.
+- Tags: every session row also carries tag chips underneath the
+  name. Click a chip's x to remove it, or the tag link to add one
+  (Enter saves, Escape cancels). A tag is lowercase letters, digits,
+  and hyphens only, at most 24 characters, at most 8 tags per
+  session; anything else you type is dropped character by character
+  (spaces and underscores disappear rather than becoming hyphens).
+  Tags are for your reference and for reply targeting: agents can
+  set their own from the CLI (see Naming sessions from a shell
+  below), so a session can hang its name on itself the moment it
+  starts.
 - Session state is derived from recency, not just the last event:
   active now (green) when the session was seen within five minutes;
   running (green) while it keeps producing events inside a thirty
@@ -45,11 +55,12 @@ they happened.
   so a press on the page and a press on a phone notification have the
   same effect.
 - Reply: a text box with an explicit target line: reply to session
-  <id>, reply via thread <id>, or no target selected. Pick a target by
-  clicking a session row or an ask reply link; Cmd+Enter or
-  Ctrl+Enter sends. A sent reply lands in the store and is appended
-  to `~/.tugline/replies.jsonl` in the same format the daemon writes
-  for phone replies.
+  <name> (label first, short id second, so you always see exactly
+  where it goes), reply via thread <id>, or no target selected. Pick
+  a target by clicking a session row or an ask reply link; Cmd+Enter
+  or Ctrl+Enter sends. A sent reply lands in the store and is
+  appended to `~/.tugline/replies.jsonl` in the same format the
+  daemon writes for phone replies.
 - Header health: daemon running, stopped, or unknown; ntfy ok or
   unreachable; how many spool records are pending; how long since the
   last ingest; and a live or reconnecting chip for the event stream
@@ -115,19 +126,52 @@ Security below).
 | Method and path | What it does |
 | --- | --- |
 | GET `/` | the console page |
-| GET `/api/state` | one render in one read: sessions (decorated with `display_state` and a collision-proof `display_id`, active-now first), the last 50 events, threads, the last 20 replies, headline counts, health, spool depth, last ingest time |
-| GET `/api/sessions` | all sessions with the same decoration and ordering as `/api/state` |
+| GET `/api/state` | one render in one read: sessions (decorated with `display_state` and a collision-proof `display_id`, active-now first, each with its `tags`), the last 50 events, threads, the last 20 replies, headline counts, health, spool depth, last ingest time |
+| GET `/api/sessions` | all sessions with the same decoration, `tags`, and ordering as `/api/state` |
 | GET `/api/events?limit=50&session=<id>` | events newest first, optionally scoped to one session; a non-integer limit is a 400 |
 | GET `/api/threads?status=open` | approval threads, newest first, optionally one status |
 | GET `/api/replies?limit=50` | replies, newest first; a non-integer limit is a 400 |
 | GET `/api/events/stream` | server-sent events: one `snapshot` on connect, then a `delta` after each ingest pass (about every 2 seconds), a `: ping` keepalive when 15 seconds pass with nothing to send |
-| POST `/api/replies` | body must be a JSON object with a string `body` and exactly one target, `thread_nonce` or `session_id`, or 400; an unknown thread nonce is a 404; records the reply and appends the replies.jsonl line |
+| POST `/api/replies` | body must be a JSON object with a string `body` and exactly one target, `thread_nonce` or `session_id`, or 400; the `session_id` value is resolved as an exact session id first, then a label exactly one session carries, then a tag exactly one session carries; an ambiguous label or tag is a 400 whose `sessions` key lists every matching session id, an unknown name a 404, an unknown thread nonce a 404; records the reply against the resolved session and appends the replies.jsonl line |
 | POST `/api/approvals/<nonce>?decision=allow` | `decision` must be `allow` or `deny` or 400; an unknown nonce is a 404; an already answered nonce returns 200 with `status: already answered` and never flips the recorded decision |
 | PUT `/api/sessions/<id>/label` | body must be a JSON object with a string `label`: plain text (no control characters), trimmed, at most 60 characters, or 400; an empty label clears it; an unknown session id is a 404. Sets the row's operator label, the primary name the page shows |
+| PUT `/api/sessions/<id>/tag/<tag>` | attaches one tag to the session: normalized to lowercase [a-z0-9-] (invalid characters dropped), at most 24 characters, at most 8 tags per session, or 400; an unknown session id is a 404; attaching a tag already present is a no-op 200. Returns the session row with its `tags` |
+| DELETE `/api/sessions/<id>/tag/<tag>` | detaches one tag; removing a tag that is not attached is still a 200; an unknown session id is a 404. Returns the session row with its `tags` |
 
 Event queries are ordered by timestamp, not insertion: spool records
 can arrive out of order, and the store sorts them so the stream reads
 chronologically.
+
+## Naming sessions from a shell
+
+Labels and tags are not console-only: the `tug` CLI writes the same
+store, so an agent can name or tag its own session (agents know their
+session id from context, and the id is always an explicit flag; there
+is no environment fallback):
+
+```
+tug label --session <id> "night build"   # set the label
+tug label --session <id> --clear         # clear it
+tug tag --session <id> build w7          # attach one or more tags
+tug untag --session <id> build           # detach them
+tug sessions                             # list: id, label, tags, state
+tug sessions --label "night build"       # filter by exact label
+tug sessions --tag build                 # filter by tag
+tug sessions --json                      # one JSON array instead
+```
+
+Every naming command first folds the spool into the store once, the
+same idempotent pass the console performs, so the commands work on a
+fresh home even when no console is running. An unknown session id
+exits 2 with a note that sessions come from spooled hook events; tags
+follow the same normalization and limits as the API (lowercase
+[a-z0-9-], at most 24 characters, at most 8 per session, invalid
+characters dropped).
+
+Name-based reply targeting works from curl too, exactly as the reply
+box does it: pass the label or tag as `session_id` in the POST body
+and the console resolves it (id first, then unique label, then unique
+tag; ambiguity is a 400 listing the matching sessions).
 
 ## Security
 

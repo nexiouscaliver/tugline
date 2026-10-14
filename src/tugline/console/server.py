@@ -31,11 +31,12 @@ import threading
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, unquote, urlsplit
 
 from tugline.console.ingest import IngestThread, daemon_health, ntfy_health
 from tugline.console.view import decorate_sessions
 from tugline.core import approval_files, spool
+from tugline.core.store import TAG_MAX_CHARS, TAG_MAX_PER_SESSION, normalize_tag
 
 DEFAULT_PORT = 2588
 SSE_PING_SECONDS = 15.0
@@ -82,6 +83,9 @@ class _Handler(BaseHTTPRequestHandler):
 
     def do_PUT(self):
         self._route("PUT")
+
+    def do_DELETE(self):
+        self._route("DELETE")
 
     def _route(self, method):
         console = self.server.console
@@ -240,6 +244,8 @@ class ConsoleServer:
             return self._post(name, segments, query, body)
         if method == "PUT":
             return self._put(name, segments, query, body)
+        if method == "DELETE":
+            return self._delete(name, segments, query)
         return 404, {"error": "unknown endpoint"}
 
     def auth_denied(self, headers, query):
@@ -327,7 +333,62 @@ class ConsoleServer:
             and segments[3] == "label"
         ):
             return self._put_session_label(segments[2], body)
+        if (
+            name == "sessions"
+            and len(segments) == 5
+            and segments[3] == "tag"
+        ):
+            return self._put_session_tag(
+                unquote(segments[2]), unquote(segments[4])
+            )
         return 404, {"error": "unknown endpoint"}
+
+    def _delete(self, name, segments, query):
+        if (
+            name == "sessions"
+            and len(segments) == 5
+            and segments[3] == "tag"
+        ):
+            return self._delete_session_tag(
+                unquote(segments[2]), unquote(segments[4])
+            )
+        return 404, {"error": "unknown endpoint"}
+
+    def _put_session_tag(self, session_id, tag):
+        """Attach one tag to one session.
+
+        The tag is normalized first; a tag that survives as nothing
+        or exceeds the length cap is a 400, an unknown session a 404,
+        a ninth distinct tag a 400. Attaching an existing tag is a
+        no-op 200. Token-gated like every /api route.
+        """
+        clean = normalize_tag(tag)
+        if not clean:
+            return 400, {
+                "error": "tag must contain letters, digits, or hyphens"
+            }
+        if len(clean) > TAG_MAX_CHARS:
+            return 400, {
+                "error": "tag must be at most %d characters" % TAG_MAX_CHARS
+            }
+        try:
+            row = self.store.add_session_tag(session_id, clean)
+        except KeyError:
+            return 404, {"error": "unknown session"}
+        except ValueError as exc:
+            return 400, {"error": str(exc)}
+        return 200, {"ok": True, "session": row}
+
+    def _delete_session_tag(self, session_id, tag):
+        """Detach one tag from one session; removing an absent tag is
+        still a 200. Unknown session is a 404."""
+        try:
+            row = self.store.remove_session_tag(session_id, tag)
+        except KeyError:
+            return 404, {"error": "unknown session"}
+        except ValueError as exc:
+            return 400, {"error": str(exc)}
+        return 200, {"ok": True, "session": row}
 
     def _put_session_label(self, session_id, body):
         """Set or clear one session's operator label.
@@ -370,6 +431,26 @@ class ConsoleServer:
             return 400, {"error": "exactly one of thread_nonce or session_id"}
         if not isinstance(data.get("body"), str):
             return 400, {"error": "body must be a string"}
+        if thread_nonce is None and not isinstance(session_id, str):
+            return 400, {"error": "session_id must be a string"}
+        if thread_nonce is None:
+            # name targeting: the field accepts an exact session id, a
+            # label exactly one session carries, or a tag exactly one
+            # session carries, in that order; an ambiguous name is a
+            # 400 that lists the matching sessions so the console can
+            # offer the choice
+            resolved = self.store.resolve_session_ref(session_id)
+            if resolved["ambiguous"]:
+                return 400, {
+                    "error": "ambiguous %s: %d sessions match; pass an"
+                    " exact session id"
+                    % (resolved.get("kind") or "name",
+                       len(resolved["candidates"])),
+                    "sessions": resolved["candidates"],
+                }
+            if resolved["match"] is None:
+                return 404, {"error": "unknown session"}
+            session_id = resolved["session_id"]
         try:
             row = self.store.add_reply(
                 data["body"],

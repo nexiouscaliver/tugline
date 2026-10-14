@@ -9,6 +9,15 @@ that log into tables a console can query in one place:
   derived state (waiting after a permissionrequest, done after a
   stop, running otherwise), and an operator-settable display label
   (NULL when unset; ingest never touches it).
+- tags: many short names per session (schema v4), set by the
+  operator through the console or by the agent itself through the
+  CLI. A tag is lowercase, trimmed, [a-z0-9-] only, at most 24
+  characters, at most 8 per session; (session_id, tag) is the
+  primary key. Tags give reply targeting a second name space
+  alongside labels: a reply reference resolves as an exact session
+  id first, then a label exactly one session carries, then a tag
+  exactly one session carries, with ambiguity reported rather than
+  guessed.
 - events: every spool record, one row per record id. spool_id is
   UNIQUE, which with a SELECT check is what makes ingest idempotent.
   Rows carry the adapter/project/cwd session fields when the record
@@ -39,6 +48,10 @@ from datetime import datetime, timezone
 from tugline.core import spool
 
 SCHEMA_VERSION_KEY = "schema_version"
+
+TAG_MAX_CHARS = 24
+TAG_MAX_PER_SESSION = 8
+_TAG_ALPHABET = frozenset("abcdefghijklmnopqrstuvwxyz0123456789-")
 
 MIGRATIONS = [
     (
@@ -104,7 +117,29 @@ MIGRATIONS = [
         ALTER TABLE sessions ADD COLUMN label TEXT;
         """,
     ),
+    (
+        4,
+        """
+        CREATE TABLE tags (
+            session_id TEXT NOT NULL,
+            tag TEXT NOT NULL,
+            PRIMARY KEY (session_id, tag)
+        );
+        """,
+    ),
 ]
+
+
+def normalize_tag(value) -> str:
+    """One tag in canonical form; "" when nothing of it is a tag.
+
+    Lowercased and trimmed, every character outside [a-z0-9-]
+    stripped (not replaced), no length truncation: callers decide
+    whether an over-length result is refused (the store and the
+    console both refuse it).
+    """
+    text = str(value or "").strip().lower()
+    return "".join(ch for ch in text if ch in _TAG_ALPHABET)
 
 
 def connect(path) -> Store:
@@ -473,7 +508,7 @@ class Store:
         The label is stored exactly as given: validation and trimming
         belong to the caller (the console API). An empty value clears
         the label (NULL). Raises KeyError for a session id the store
-        has never seen. Returns the updated row.
+        has never seen. Returns the updated row with its tags.
         """
         session_id = str(session_id)
         value = str(label) if label else None
@@ -494,11 +529,148 @@ class Store:
             except BaseException:
                 self.conn.execute("ROLLBACK")
                 raise
-        return dict(
+        return self._session_row(session_id)
+
+    def add_session_tag(self, session_id, tag) -> dict:
+        """Attach one tag to one session; returns the updated row.
+
+        The tag is normalized first (lowercase, trimmed, [a-z0-9-]);
+        ValueError when nothing survives normalization, when it
+        exceeds TAG_MAX_CHARS, or when it would be a ninth distinct
+        tag on the session. Attaching a tag already present is a
+        no-op. KeyError for a session the store has never seen.
+        """
+        return self._write_session_tag(session_id, tag, attach=True)
+
+    def remove_session_tag(self, session_id, tag) -> dict:
+        """Detach one tag from one session; returns the updated row.
+
+        The tag is normalized first. Removing a tag that is not
+        attached is a no-op. KeyError for an unknown session.
+        """
+        return self._write_session_tag(session_id, tag, attach=False)
+
+    def _write_session_tag(self, session_id, tag, attach) -> dict:
+        session_id = str(session_id)
+        tag = normalize_tag(tag)
+        with self._lock:
+            self.conn.execute("BEGIN IMMEDIATE")
+            try:
+                row = self.conn.execute(
+                    "SELECT 1 FROM sessions WHERE session_id = ?",
+                    (session_id,),
+                ).fetchone()
+                if row is None:
+                    raise KeyError("unknown session: %r" % session_id)
+                if attach:
+                    if not tag:
+                        raise ValueError(
+                            "tag must contain letters, digits, or hyphens"
+                        )
+                    if len(tag) > TAG_MAX_CHARS:
+                        raise ValueError(
+                            "tag must be at most %d characters"
+                            % TAG_MAX_CHARS
+                        )
+                    have = self._tags_locked(session_id)
+                    if tag not in have and len(have) >= TAG_MAX_PER_SESSION:
+                        raise ValueError(
+                            "a session carries at most %d tags"
+                            % TAG_MAX_PER_SESSION
+                        )
+                    self.conn.execute(
+                        "INSERT OR IGNORE INTO tags (session_id, tag)"
+                        " VALUES (?, ?)",
+                        (session_id, tag),
+                    )
+                else:
+                    self.conn.execute(
+                        "DELETE FROM tags WHERE session_id = ? AND tag = ?",
+                        (session_id, tag),
+                    )
+                self.conn.execute("COMMIT")
+            except BaseException:
+                self.conn.execute("ROLLBACK")
+                raise
+        return self._session_row(session_id)
+
+    def _tags_locked(self, session_id) -> list:
+        """Tags for one session, alphabetical; caller holds a write
+        transaction or is fine with a racing read."""
+        rows = self.conn.execute(
+            "SELECT tag FROM tags WHERE session_id = ? ORDER BY tag",
+            (session_id,),
+        ).fetchall()
+        return [row[0] for row in rows]
+
+    def session_tags(self, session_id) -> list:
+        """One session's tags, alphabetical."""
+        return self._tags_locked(str(session_id))
+
+    def sessions_with_tag(self, tag) -> list:
+        """Session ids carrying one normalized tag, insertion-stable
+        (ordered by when the store last saw each session)."""
+        rows = self.conn.execute(
+            "SELECT t.session_id FROM tags t JOIN sessions s"
+            " ON s.session_id = t.session_id WHERE t.tag = ?"
+            " ORDER BY s.last_seen DESC",
+            (normalize_tag(tag),),
+        ).fetchall()
+        return [row[0] for row in rows]
+
+    def sessions_with_label(self, label) -> list:
+        """Session ids carrying one label exactly as given."""
+        rows = self.conn.execute(
+            "SELECT session_id FROM sessions WHERE label = ?"
+            " ORDER BY last_seen DESC",
+            (str(label),),
+        ).fetchall()
+        return [row[0] for row in rows]
+
+    def resolve_session_ref(self, ref) -> dict:
+        """Resolve one reply-target reference to a session.
+
+        Order: an exact session id, then a label exactly one session
+        carries, then a tag exactly one session carries. Returns a
+        dict with match ("session_id", "label", or "tag") and
+        session_id on success; on failure match is None with
+        ambiguous True and candidates holding every matching session
+        id when a label or tag matches more than one session, and
+        ambiguous False when nothing matched at all. The caller
+        decides the error shape (the console answers ambiguity with
+        a 400 carrying the list).
+        """
+        ref = str(ref or "")
+        row = self.conn.execute(
+            "SELECT 1 FROM sessions WHERE session_id = ?", (ref,)
+        ).fetchone()
+        if row is not None:
+            return {"match": "session_id", "session_id": ref,
+                    "ambiguous": False, "candidates": []}
+        for match, ids in (
+            ("label", self.sessions_with_label(ref)),
+            ("tag", self.sessions_with_tag(ref)),
+        ):
+            if not ids:
+                continue
+            if len(ids) == 1:
+                return {"match": match, "session_id": ids[0],
+                        "ambiguous": False, "candidates": []}
+            return {"match": None, "session_id": "", "kind": match,
+                    "ambiguous": True, "candidates": sorted(ids)}
+        return {"match": None, "session_id": "",
+                "ambiguous": False, "candidates": []}
+
+    def _session_row(self, session_id) -> dict:
+        """One session row with its tags attached."""
+        row = dict(
             self.conn.execute(
-                "SELECT * FROM sessions WHERE session_id = ?", (session_id,)
+                "SELECT * FROM sessions WHERE session_id = ?",
+                (str(session_id),),
             ).fetchone()
         )
+        row["tags"] = self._tags_locked(session_id)
+        return row
 
     def add_reply(self, body, thread_nonce=None, session_id=None,
                   source="console") -> dict:
@@ -572,11 +744,23 @@ class Store:
     # -- queries --
 
     def sessions(self) -> list:
-        """All sessions, most recently seen first."""
+        """All sessions, most recently seen first, each with its tags."""
         rows = self.conn.execute(
             "SELECT * FROM sessions ORDER BY last_seen DESC"
         ).fetchall()
-        return [dict(row) for row in rows]
+        by_session = {}
+        for tag_row in self.conn.execute(
+            "SELECT session_id, tag FROM tags ORDER BY tag"
+        ).fetchall():
+            by_session.setdefault(tag_row["session_id"], []).append(
+                tag_row["tag"]
+            )
+        out = []
+        for row in rows:
+            item = dict(row)
+            item["tags"] = by_session.get(item["session_id"], [])
+            out.append(item)
+        return out
 
     def events(self, limit=50, session_id=None) -> list:
         """Events newest first; one session when session_id is given.
