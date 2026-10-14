@@ -232,6 +232,86 @@ def test_sessions_endpoint(bench, home):
     assert [s["session_id"] for s in data["sessions"]] == ["sess-1"]
 
 
+# -- GET /api/sessions/<id> --
+
+
+def seed_detail_session(session_id="sess-detail"):
+    """One session with a known prompt body and a known stop preview."""
+    spool.append(
+        paths.spool_root(),
+        event="userpromptsubmit",
+        session_id=session_id,
+        topic="main",
+        priority="default",
+        title="prompt submitted",
+        body="fix the flaky test",
+    )
+    return spool.append(
+        paths.spool_root(),
+        event="stop",
+        session_id=session_id,
+        topic="main",
+        priority="default",
+        title="session stopped",
+        body="session %s stopped" % session_id,
+        extra={
+            "adapter": "zcode",
+            "cwd": "/w/tugline-console",
+            "project": "tugline-console",
+            "response_preview": "flaky test fixed",
+        },
+    )
+
+
+def test_session_detail_endpoint(bench, home):
+    seed_detail_session()
+    assert wait_for(lambda: bench.store.sessions())
+    status, data = bench.get_json("/api/sessions/sess-detail")
+    assert status == 200
+    session = data["session"]
+    assert session["session_id"] == "sess-detail"
+    # the row is decorated exactly like the sessions list rows
+    assert session["display_state"] == "done"
+    assert session["display_id"]
+    assert session["adapter"] == "zcode"
+    assert session["project"] == "tugline-console"
+    assert session["cwd"] == "/w/tugline-console"
+    assert session["tags"] == []
+    assert data["last_prompt"] == "fix the flaky test"
+    assert data["last_response"] == "flaky test fixed"
+    assert [e["event"] for e in data["events"]] == [
+        "stop",
+        "userpromptsubmit",
+    ]
+    assert all(e["session_id"] == "sess-detail" for e in data["events"])
+
+
+def test_session_detail_unknown_id_is_404(bench):
+    status, data = bench.get_json("/api/sessions/ghost")
+    assert status == 404
+    assert data["error"] == "unknown session"
+
+
+def test_session_detail_sits_under_the_token_gate(tmp_path, monkeypatch):
+    monkeypatch.setenv("TUGLINE_HOME", str(tmp_path))
+    monkeypatch.delenv("TUGLINE_CONFIG", raising=False)
+    (tmp_path / "credentials").write_text("sekret\n")
+    bench = Bench(tmp_path, token_file=tmp_path / "credentials")
+    try:
+        status, raw = bench.request("GET", "/api/sessions/ghost")
+        assert status == 403
+        assert json.loads(raw)["error"] == "bad token"
+        # past the gate the same request answers by routing: 404
+        status, _ = bench.request(
+            "GET",
+            "/api/sessions/ghost",
+            headers={"Authorization": "Bearer sekret"},
+        )
+        assert status == 404
+    finally:
+        bench.stop()
+
+
 def test_events_endpoint_limit_and_session(bench, home):
     seed_permission_request("nonce-1", session_id="sess-1")
     seed_permission_request("nonce-2", session_id="sess-2")
