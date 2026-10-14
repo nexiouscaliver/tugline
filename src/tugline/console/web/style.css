@@ -6,6 +6,9 @@
 :root {
   --bg: #0e1116;
   --panel: #131820;
+  /* filter bar surface: one step lighter than the panel, so the bar
+     reads as its own unit above the cards */
+  --bar: #171d27;
   --row-line: #1e242e;
   --border: #2a2f3a;
   --text: #c7d0d9;
@@ -374,15 +377,23 @@ tr.selected .idlink { color: var(--accent); }
 #sessions-table.no-project .col-project,
 #sessions-table.no-project td.cell-project { display: none; }
 
-/* -- sessions filter bar: inline at the top of the panel, never an
-   overlay; the chip row scrolls on one line so it never grows -- */
+/* -- sessions filter bar: one unit at the top of the panel, never an
+   overlay. A lighter surface bled to the panel edges with a bottom
+   border above the cards; row one is the search input with the count
+   and the clear x inline, row two the state segmented control, which
+   scrolls as one group on narrow widths -- */
 
-.filterbar { margin-bottom: 0.6rem; }
+.filterbar {
+  margin: 0 -0.8rem 0.75rem;
+  padding: 0.65rem 0.8rem 0.7rem;
+  background: var(--bar);
+  border-bottom: 1px solid var(--border);
+}
 
 .filter-row {
   display: flex;
   align-items: center;
-  gap: 0.4rem;
+  gap: 0.45rem;
 }
 
 #filter-search {
@@ -400,16 +411,77 @@ tr.selected .idlink { color: var(--accent); }
 
 #filter-search:focus { border-color: var(--accent); outline: none; }
 
-#filter-clear { min-height: 36px; min-width: 44px; }
+/* the count renders only while a filter is active, right-aligned and
+   squeezed between the input and the clear x */
+.filter-count {
+  flex: 0 0 auto;
+  margin: 0;
+  font-family: var(--mono);
+  font-size: 0.8rem;
+  color: var(--muted);
+  text-align: right;
+  white-space: nowrap;
+}
 
-.chiprow {
+/* the clear control: a bordered square with the ASCII x, flush
+   against the input's right edge, both 36px */
+.filter-x {
+  flex: 0 0 auto;
+  min-width: 36px;
+  min-height: 36px;
+  padding: 0;
+  font-family: var(--mono);
+  font-size: 0.9rem;
+  line-height: 1;
+  color: var(--muted);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 2px;
+  cursor: pointer;
+}
+
+.filter-x:hover { color: var(--text); border-color: var(--gray); }
+
+/* state segmented control: one bordered group, 1px internal dividers
+   and no gaps between segments; the active segment carries the accent
+   tint, accent text, and a 2px accent underline on its bottom edge */
+.fsegments {
   display: flex;
   flex-wrap: nowrap;
   overflow-x: auto;
-  gap: 0.35rem;
-  margin-top: 0.45rem;
+  margin-top: 0.55rem;
+  border: 1px solid var(--border);
+  border-radius: 2px;
 }
 
+.fseg {
+  flex: 0 0 auto;
+  min-height: 40px;
+  padding: 0.45rem 0.9rem;
+  font-family: var(--mono);
+  font-size: 0.8rem;
+  line-height: 1;
+  color: var(--muted);
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  border-right: 1px solid var(--border);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.fseg:last-child { border-right: none; }
+
+.fseg:hover { color: var(--text); }
+
+.fseg.active {
+  color: var(--accent);
+  background: rgba(88, 166, 255, 0.12);
+  border-bottom-color: var(--accent);
+}
+
+/* the standalone chip style, now carried by the stream panel's group
+   toggle only (the filter bar's five states moved to .fseg above) */
 .fchip {
   flex: 0 0 auto;
   min-height: 44px;
@@ -431,13 +503,6 @@ tr.selected .idlink { color: var(--accent); }
   color: var(--accent);
   border-color: var(--accent);
   background: rgba(88, 166, 255, 0.08);
-}
-
-.filter-count {
-  margin: 0.4rem 0 0;
-  font-family: var(--mono);
-  font-size: 0.8rem;
-  color: var(--muted);
 }
 
 /* -- session detail page -- */

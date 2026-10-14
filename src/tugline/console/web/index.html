@@ -31,16 +31,17 @@
       <div class="filter-row">
         <input id="filter-search" type="text" placeholder="search sessions"
                aria-label="search sessions" autocomplete="off">
-        <button type="button" class="btn" id="filter-clear" hidden>clear</button>
+        <span class="filter-count" id="filter-count" hidden></span>
+        <button type="button" class="filter-x" id="filter-clear" hidden
+                aria-label="clear the session filter">x</button>
       </div>
-      <div class="chiprow" id="filter-chips">
-        <button type="button" class="fchip active" id="filter-chip-all">All</button>
-        <button type="button" class="fchip" id="filter-chip-running">Running</button>
-        <button type="button" class="fchip" id="filter-chip-waiting">Waiting on me</button>
-        <button type="button" class="fchip" id="filter-chip-idle">Idle</button>
-        <button type="button" class="fchip" id="filter-chip-done">Done</button>
+      <div class="fsegments" id="filter-chips">
+        <button type="button" class="fseg active" id="filter-chip-all">All</button>
+        <button type="button" class="fseg" id="filter-chip-running">Running</button>
+        <button type="button" class="fseg" id="filter-chip-waiting">Waiting on me</button>
+        <button type="button" class="fseg" id="filter-chip-idle">Idle</button>
+        <button type="button" class="fseg" id="filter-chip-done">Done</button>
       </div>
-      <p class="filter-count" id="filter-count" hidden></p>
     </div>
     <div class="scroll">
       <table id="sessions-table">
