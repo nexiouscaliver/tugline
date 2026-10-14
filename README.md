@@ -13,6 +13,17 @@ Push notifications and phone replies for coding-agent sessions, over ntfy.
   loopback receiver. See [docs/adapters.md](docs/adapters.md) for the
   receiver port, the external_url setting, and how to expose it to your
   phone safely.
+- Lets an agent ask you a multiple choice question and waits for the
+  answer: `tug ask --session <id> --option "A: ship" --option "B: roll
+  back" "which deploy?"` pushes one high priority notification, blocks
+  up to the timeout (default 300s), prints the chosen option, and exits
+  0 (exit 1 with `no answer` on timeout). Answers come from the console
+  (a tap or a reply), a bound ntfy reply whose body is just the letter,
+  or `tug answer --thread <nonce> <key>`.
+- Names every session by itself: the first prompt auto-labels a session,
+  the first sighting auto-tags it with its adapter and project, and one
+  display rule (the label, else a collision-proof short id) renders the
+  same name everywhere.
 
 The local console is the at-a-glance side of the same machine: one web
 page of sessions and their states, the live event stream, open approval
