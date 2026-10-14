@@ -102,6 +102,12 @@ come back the same way, into a local file.
                         v
                     ~/.tugline/replies.jsonl
                     tug status prints the last reply
+                        |
+                    wake dispatcher (idle session + bound reply)
+                        |
+                        v
+                    claude --resume <session> -p "<reply>"
+                    (or: queued for next-boundary injection)
 ```
 
 ## Adapters
@@ -133,6 +139,44 @@ location: the ntfy app cannot dedupe one topic subscribed twice against two
 server URLs, so subscribe one URL per place you sit, or you will see split
 brain or double buzzes. Details, the subscription matrix, and reboot notes:
 [docs/channels.md](docs/channels.md).
+
+## Wake on reply
+
+The whole point of replying from the phone is that the session acts
+on it now, not at whatever turn boundary comes next. tugline delivers
+a reply two ways, and they compose:
+
+- Running session: the reply is injected into the session's context
+  at its next prompt (the per-turn injection), so the work continues
+  inside the turn you are already watching.
+- Idle session (last spooled event a stop or a session start): the
+  daemon's wake dispatcher spawns the adapter's driver with the reply
+  body as the prompt, resuming the session on the spot. For claude
+  sessions that is `claude --resume <session> -p "<your reply>"`
+  (flag order verified against the CLI's own help), run in the
+  session's project directory. The woken reply is marked consumed so
+  the injection path never double-delivers it.
+
+Rails: one wake per reply, one wake in flight per session, a global
+concurrent cap (default 1), a per-wake timeout that kills the driver
+(default 1800s), and every decision journaled to
+`~/.tugline/state/wake.jsonl` and visible as a wake chip on the
+console's reply list. `toggles.wake = false` restores the pre-wake
+behavior exactly. `wake.dry_run = true` (the shipped default) records
+the exact command without spawning anything: check
+`~/.tugline/state/wake.jsonl`, then flip it to false to arm.
+
+One honest limitation: this change ships no zcode wake driver. The
+ZCode desktop app does bundle a CLI (ZCode.app/Contents/Resources/
+glm/zcode.cjs, v0.16.9) whose help documents headless resume flags
+(`-p, --prompt <text>`, `--resume <sessionId>`, `--cwd <path>`), but
+wiring that driver is a queued follow-up lane; until it lands,
+replies to idle zcode sessions are logged unsupported and stay queued
+for the session's next-boundary injection. The driver registry
+(`wake.adapters`) and the claude command template
+(`wake.claude_command`) are config-driven, so the zcode driver is an
+additive change when it lands. Details:
+[docs/console.md](docs/console.md#wake-on-reply).
 
 ## Privacy
 

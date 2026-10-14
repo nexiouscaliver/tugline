@@ -60,7 +60,19 @@ they happened.
   a target by clicking a session row or an ask reply link; Cmd+Enter
   or Ctrl+Enter sends. A sent reply lands in the store and is
   appended to `~/.tugline/replies.jsonl` in the same format the
-  daemon writes for phone replies.
+  daemon writes for phone replies, plus the session binding, so the
+  wake dispatcher can act on it (see Wake on reply below).
+- Wake state: each recent reply carries a chip with what the wake
+  dispatcher did with it: dispatched (the session's driver was
+  spawned with the reply as its prompt), finished (the driver exited;
+  the chip replaces dispatched), timed_out (the per-wake timeout
+  killed it), unsupported (the target session's adapter has no wake
+  driver yet; zcode until its driver lane lands), or skipped (the
+  session was busy or a wake was already in flight, so the reply
+  waits for the session's own next-boundary injection). No chip means
+  no wake decision was ever recorded for that reply, which is the
+  honest reading for anything sent before the feature or while the
+  daemon is stopped.
 - Header health: daemon running, stopped, or unknown; ntfy ok or
   unreachable; how many spool records are pending; how long since the
   last ingest; and a live or reconnecting chip for the event stream
@@ -130,7 +142,7 @@ Security below).
 | GET `/api/sessions` | all sessions with the same decoration, `tags`, and ordering as `/api/state` |
 | GET `/api/events?limit=50&session=<id>` | events newest first, optionally scoped to one session; a non-integer limit is a 400 |
 | GET `/api/threads?status=open` | approval threads, newest first, optionally one status |
-| GET `/api/replies?limit=50` | replies, newest first; a non-integer limit is a 400 |
+| GET `/api/replies?limit=50` | replies, newest first, each row decorated with its `wake` state (`{state, ts}` from the wake dispatcher journal, or null when no decision was recorded); a non-integer limit is a 400 |
 | GET `/api/events/stream` | server-sent events: one `snapshot` on connect, then a `delta` after each ingest pass (about every 2 seconds), a `: ping` keepalive when 15 seconds pass with nothing to send |
 | POST `/api/replies` | body must be a JSON object with a string `body` and exactly one target, `thread_nonce` or `session_id`, or 400; the `session_id` value is resolved as an exact session id first, then a label exactly one session carries, then a tag exactly one session carries; an ambiguous label or tag is a 400 whose `sessions` key lists every matching session id, an unknown name a 404, an unknown thread nonce a 404; records the reply against the resolved session and appends the replies.jsonl line |
 | POST `/api/approvals/<nonce>?decision=allow` | `decision` must be `allow` or `deny` or 400; an unknown nonce is a 404; an already answered nonce returns 200 with `status: already answered` and never flips the recorded decision |
@@ -141,6 +153,53 @@ Security below).
 Event queries are ordered by timestamp, not insertion: spool records
 can arrive out of order, and the store sorts them so the stream reads
 chronologically.
+
+## Wake on reply
+
+A reply you send from the console used to wait for its session's next
+turn boundary to be seen. With wake-on-reply the daemon closes that
+gap: when a reply bound to a session lands while that session looks
+idle (its last spooled event was a stop or a session start), the
+daemon spawns the session adapter's driver with the reply body as the
+prompt, resuming the session on the spot. The reply is marked
+consumed the moment the driver spawns, so the next-boundary injection
+never double-delivers it.
+
+The pieces:
+
+- The dispatcher runs inside the daemon, one bounded pass per cycle,
+  after the spool flush. It only considers replies carrying a session
+  binding, which today means replies sent from the console; a
+  free-form phone reply (no target) stays on the injection path.
+- Session facts (adapter, cwd, idleness) come from the store the
+  console's ingest thread keeps current, so a session started after
+  the last console restart is addressable once its first spool record
+  lands.
+- One wake per reply id, one wake in flight per session, a global
+  concurrent cap (`wake.max_concurrent`, default 1), and a per-wake
+  timeout that kills the driver (`wake.timeout_seconds`, default
+  1800). Every decision and every exit is journaled to
+  `~/.tugline/state/wake.jsonl` and shown as the wake chip on the
+  reply.
+- `toggles.wake = false` restores the pre-wake behavior exactly:
+  nothing spawns, nothing is marked, the chip never appears.
+- `wake.dry_run = true` (the shipped default) logs and journals the
+  exact command without spawning anything, so you can verify what
+  would run before arming it. Flip it to false in
+  `~/.tugline/config.toml` once the journal looks right.
+
+The zcode limitation, stated plainly: this change ships no zcode wake
+driver. The ZCode desktop app does bundle a CLI
+(ZCode.app/Contents/Resources/glm/zcode.cjs, v0.16.9) whose help
+documents headless resume flags (`-p, --prompt <text>`, `--resume
+<sessionId>`, `--cwd <path>`; verified against the binary), but
+wiring that driver is a queued follow-up lane. Until it lands,
+replies to idle zcode sessions log `wake unsupported for adapter
+zcode`, show the unsupported chip, and stay unconsumed until the
+session's own next-boundary injection picks them up. The driver
+registry is config-driven (`wake.adapters`), so the zcode driver is
+an additive change when it lands; claude is the enabled driver by
+default, with the command template in `wake.claude_command`.
 
 ## Naming sessions from a shell
 
