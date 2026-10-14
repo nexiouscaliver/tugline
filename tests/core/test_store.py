@@ -57,7 +57,7 @@ def test_schema_version_five_and_tables_created(tmp_path):
     version = store.conn.execute(
         "SELECT value FROM meta WHERE key = 'schema_version'"
     ).fetchone()[0]
-    assert version == "5"
+    assert version == "6"
     names = {
         row[0]
         for row in store.conn.execute(
@@ -90,7 +90,7 @@ def test_version_one_store_migrates_events_columns(tmp_path):
     version = store.conn.execute(
         "SELECT value FROM meta WHERE key = 'schema_version'"
     ).fetchone()[0]
-    assert version == "5"
+    assert version == "6"
     event_cols = {
         row[1] for row in store.conn.execute("PRAGMA table_info(events)")
     }
@@ -102,7 +102,9 @@ def test_version_four_store_migrates_response_preview(tmp_path):
     path = tmp_path / "store" / "tugline.db"
     path.parent.mkdir(parents=True)
     conn = sqlite3.connect(path)
-    for _, sql in MIGRATIONS[:-1]:  # everything but v5
+    for version, sql in MIGRATIONS:  # build a version-four store: 1..4 only
+        if version >= 5:
+            break
         conn.executescript(sql)
     conn.execute(
         "INSERT INTO events (spool_id, ts, session_id, event, title, body)"
@@ -118,7 +120,7 @@ def test_version_four_store_migrates_response_preview(tmp_path):
     version = store.conn.execute(
         "SELECT value FROM meta WHERE key = 'schema_version'"
     ).fetchone()[0]
-    assert version == "5"
+    assert version == "6"
     event_cols = {
         row[1] for row in store.conn.execute("PRAGMA table_info(events)")
     }

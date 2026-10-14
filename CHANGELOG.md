@@ -9,6 +9,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- The tug ask primitive: one multiple choice question an operator
+  answers from tugline itself. `tug ask --session <id> --option
+  "A: description"... [--timeout N] "question"` creates an ask
+  thread (the existing threads table, `kind: "ask"`, options stored
+  as JSON), pushes one HIGH priority notification titled
+  `[<harness>] <project> - asks: <question>` through the enriched
+  title helpers with the lettered options and reply guidance in the
+  body, then blocks polling for an answer up to the timeout
+  (default 300s, max 1800s). Answers arrive as a console option tap
+  or reply bound to the thread nonce (id > label > tag targeting),
+  a reply journal line whose body is exactly one option key and
+  whose thread/session binding resolves to the ask (a binding is
+  required, and a session-bound reply lands on the session's newest
+  open ask), or `tug answer --thread <nonce> <key>`. On an answer
+  the command prints `key: text` and exits 0; on timeout it prints
+  `no answer`, exits 1, and marks the thread expired. Wrong keys
+  are rejected (the ask keeps waiting), no failure path raises, and
+  a publish failure never kills an ask (it stays answerable from
+  the console). Threads API rows for asks carry their parsed
+  `options` plus the answer state so the console can render
+  tappable choices (new `tugline.core.ask` module; schema version 5
+  adds the threads.options column).
+- Session auto-identity: every session is recognizable from its
+  first moments with zero operator work. On ingest the store
+  auto-labels an unlabeled session from its first suitable
+  UserPromptSubmit record (the first 5-7 words of the prompt,
+  sanitized to ASCII, collapsed whitespace, at most 40 characters,
+  no trailing punctuation artifacts; set once, later prompts never
+  overwrite) and auto-tags a session at first sight with its
+  adapter and its project label from cwd (idempotent, operator tags
+  never touched, and because auto-tags fire only at first sight an
+  operator untag is permanent). An operator label always wins and
+  pauses auto-labeling for that session, including clearing it (new
+  `label_source` column, schema version 5). One display rule
+  everywhere: the label when set, else the W7-L16 collision-proof
+  unique suffix, never the leading `sess_...` characters, exported
+  as `tugline.core.store.session_display_id` and attached to every
+  session row (`display_id`) and every event row (`label`, `tags`,
+  `display_id`) so any stream item answers who did what where.
+  Store migrations are in place from v4 (existing labels and tags
+  ride over untouched; v4 sessions without labels can still be
+  auto-labeled by their next prompt).
 - Session detail page in the console: tapping a session card (phone)
   or table row (desktop) opens a full detail view with everything
   about the session. Store schema v5 adds

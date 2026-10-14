@@ -26,9 +26,21 @@ that log into tables a console can query in one place:
   record).
 - threads: one row per approval nonce parsed out of permissionrequest
   action urls, carried from open to answered or expired by the files
-  under the approvals root.
+  under the approvals root. Ask threads (W9-L21) live in the same
+  table with kind "ask": created by the tug ask command with their
+  options as JSON in the options column, answered by any of the ask
+  paths, expired by the timeout.
 - replies: rows the console writes back toward sessions and threads;
   delivering them is a later concern, so delivered stays 0.
+
+Session identity (W9-L21) is assigned on ingest with zero operator
+work: the first suitable UserPromptSubmit record auto-labels the
+session (label_source "auto"), the session row's creation auto-tags
+it with its adapter and project label, and one display rule answers
+what to render: the label when set, else a collision-proof unique
+suffix of the id (never the leading id characters). An operator
+label always wins and pauses auto-labeling for that session,
+including clearing it (label_source "operator").
 
 Thread safety: one connection shared by the whole process
 (check_same_thread=False), WAL journal so readers do not block the
@@ -45,15 +57,30 @@ import json
 import os
 import sqlite3
 import threading
+import time
+import uuid
 from datetime import datetime, timezone
 
-from tugline.core import spool
+from tugline.core import payload, spool
 
 SCHEMA_VERSION_KEY = "schema_version"
 
 TAG_MAX_CHARS = 24
 TAG_MAX_PER_SESSION = 8
 _TAG_ALPHABET = frozenset("abcdefghijklmnopqrstuvwxyz0123456789-")
+
+# Auto-label bounds (W9-L21): the first 5-7 words of the prompt,
+# sanitized to ASCII, collapsed whitespace, at most 40 characters,
+# no trailing punctuation artifacts.
+AUTO_LABEL_MAX_WORDS = 7
+AUTO_LABEL_MAX_CHARS = 40
+_LABEL_TRAILING = ".,;:!?- \t"
+
+# The display rule (one policy everywhere): the label when set, else
+# a suffix of the session id lengthened until exactly one session in
+# the population ends with it (the W7-L16 collision-proof rule); the
+# leading "sess_..." characters are never a display id.
+DISPLAY_SUFFIX_MIN = 6
 
 MIGRATIONS = [
     (
@@ -135,6 +162,13 @@ MIGRATIONS = [
         ALTER TABLE events ADD COLUMN response_preview TEXT NOT NULL DEFAULT '';
         """,
     ),
+    (
+        6,
+        """
+        ALTER TABLE sessions ADD COLUMN label_source TEXT;
+        ALTER TABLE threads ADD COLUMN options TEXT;
+        """,
+    ),
 ]
 
 
@@ -148,6 +182,140 @@ def normalize_tag(value) -> str:
     """
     text = str(value or "").strip().lower()
     return "".join(ch for ch in text if ch in _TAG_ALPHABET)
+
+
+# -- session identity (W9-L21) --
+
+
+def _ascii_text(value) -> str:
+    """The ASCII characters of value; non-ASCII drops, never maps."""
+    return "".join(ch for ch in str(value or "") if ord(ch) < 128)
+
+
+def prompt_text_from_body(body) -> str:
+    """The prompt text out of a UserPromptSubmit body; "" when absent.
+
+    The enriched bodies read "session <short6>, prompt: <first 60
+    chars>" (W6-L12): everything after the first "prompt:" marker is
+    the prompt. The legacy bodies carry the prompt as the whole body,
+    except the no-prompt fallback "session <short6>".
+    """
+    text = str(body or "")
+    marker = text.find("prompt:")
+    if marker >= 0:
+        return text[marker + len("prompt:"):].strip()
+    if text.startswith("session "):
+        return ""
+    return text.strip()
+
+
+def auto_label_from_prompt(prompt) -> str:
+    """The auto label for one prompt; "" when nothing survives.
+
+    The first 5-7 words of the prompt: at most AUTO_LABEL_MAX_WORDS
+    words, then words drop off the end until it fits
+    AUTO_LABEL_MAX_CHARS (a single overflowing word is sliced to the
+    cap), whitespace collapsed, non-ASCII characters dropped, and
+    trailing punctuation artifacts stripped so a label never ends on
+    ".", ",", "-", and friends.
+    """
+    words = " ".join(_ascii_text(prompt).split()).split(" ")
+    label = " ".join(words[:AUTO_LABEL_MAX_WORDS])
+    while label and len(label) > AUTO_LABEL_MAX_CHARS and " " in label:
+        label = label.rsplit(" ", 1)[0]
+    if len(label) > AUTO_LABEL_MAX_CHARS:
+        label = label[:AUTO_LABEL_MAX_CHARS]
+    return label.rstrip(_LABEL_TRAILING)
+
+
+def unique_display_suffix(session_id, population) -> str:
+    """A suffix of the session id unique within population.
+
+    Starts at the shortest useful tail and lengthens one character
+    at a time until exactly one id in the list ends with it; the full
+    id when even that cannot separate two rows (byte-identical ids
+    cannot occur: session_id is the primary key). Mirrors the W7-L16
+    console rule; the store exports it so every surface renders ids
+    the same way.
+    """
+    ids = [str(i) for i in population]
+    sid = str(session_id)
+    shown = sid
+    n = DISPLAY_SUFFIX_MIN
+    while n < len(sid):
+        tail = sid[-n:]
+        if sum(1 for other in ids if other.endswith(tail)) == 1:
+            shown = tail
+            break
+        n += 1
+    return shown
+
+
+def session_display_id(session_id, label=None, population=()) -> str:
+    """THE display id for one session: the label when set, else the
+    collision-proof unique suffix. The leading id characters are
+    never the answer. Both the API rows and the console templates
+    render this, nothing else."""
+    text = str(label or "").strip()
+    if text:
+        return text
+    ids = [str(i) for i in population] if population else [session_id]
+    return unique_display_suffix(session_id, ids)
+
+
+def _auto_tag_values(carried) -> list:
+    """The auto tags for a first-sight session: its adapter and its
+    project label from cwd, normalized like every other tag. A
+    missing adapter or cwd contributes nothing ("unknown" is a
+    project_label fallback for notifications, not a tag)."""
+    out = []
+    adapter = normalize_tag(carried.get("adapter", ""))
+    if adapter:
+        out.append(adapter)
+    cwd = str(carried.get("cwd") or "").strip()
+    if cwd:
+        project = normalize_tag(payload.project_label(cwd))
+        if project:
+            out.append(project)
+    return out
+
+
+def _parse_options_json(raw):
+    """Thread options from their JSON column; None when absent or
+    unparseable (the honest no-options reading for approve rows)."""
+    if not raw:
+        return None
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+    return parsed if isinstance(parsed, list) else None
+
+
+def _validate_ask_options(options) -> list:
+    """Ask options in canonical form, or ValueError.
+
+    A non-empty list (at most 8) of objects carrying a non-empty
+    string key and a string text; the count range 2-8 belongs to the
+    CLI, the store keeps every ask answerable with at least one
+    option and never stores more than it can render.
+    """
+    if not isinstance(options, (list, tuple)) or not (
+        1 <= len(options) <= 8
+    ):
+        raise ValueError("an ask carries 1 to 8 options")
+    clean = []
+    for option in options:
+        if not isinstance(option, dict):
+            raise ValueError("each option is an object with key and text")
+        key = option.get("key")
+        text = option.get("text")
+        if not isinstance(key, str) or not key.strip():
+            raise ValueError("each option key is a non-empty string")
+        if not isinstance(text, str):
+            raise ValueError("each option text is a string")
+        clean.append({"key": key, "text": text})
+    return clean
 
 
 def connect(path) -> Store:
@@ -235,41 +403,90 @@ class Store:
         )
         self.conn.row_factory = sqlite3.Row
         self._lock = threading.Lock()
-        self.conn.execute("PRAGMA journal_mode=WAL")
+        # busy_timeout FIRST: journal_mode wants a lock too, and
+        # without the timeout a concurrent writer makes the very open
+        # of a Store fail with "database is locked"
         self.conn.execute("PRAGMA busy_timeout=5000")
+        self._ensure_wal()
         self.conn.execute("PRAGMA foreign_keys=ON")
         self._migrate()
+
+    def _ensure_wal(self):
+        """Set WAL, tolerating concurrent openers.
+
+        Switching into WAL mode is the one statement here that can
+        come back SQLITE_BUSY without consulting the busy timeout
+        (SQLite skips the handler while another connection is mid
+        transition), so a fresh database opened by several processes
+        at once needs the mode checked and the switch retried until
+        the winner's answer sticks.
+        """
+        for attempt in range(20):
+            try:
+                row = self.conn.execute("PRAGMA journal_mode").fetchone()
+                if str(row[0]).lower() == "wal":
+                    return
+                self.conn.execute("PRAGMA journal_mode=WAL")
+            except sqlite3.OperationalError:
+                time.sleep(0.01 * (attempt + 1))  # brief backoff
+                continue  # another opener holds the transition; retry
+        # final attempt outside the loop: raise if it truly will not
+        self.conn.execute("PRAGMA journal_mode=WAL")
 
     # -- schema --
 
     def _migrate(self):
-        """Apply pending migrations in order, one transaction each."""
+        """Apply pending migrations in order, one transaction each.
+
+        The version is re-read INSIDE each write transaction: two
+        Store() opens racing on the same file (the console's ingest
+        thread and a CLI command, say) serialize on BEGIN IMMEDIATE,
+        and the loser then sees the winner's version and skips
+        instead of replaying applied migrations. SQLite can still
+        hand SQLITE_BUSY to these statements without consulting the
+        busy timeout while a concurrent opener is mid WAL transition
+        (observed on python 3.14), so the whole block retries with
+        backoff; the version re-read makes a retry safe.
+        """
+        last = None
         with self._lock:
-            self.conn.execute(
-                "CREATE TABLE IF NOT EXISTS meta ("
-                "key TEXT PRIMARY KEY, value TEXT)"
-            )
-            row = self.conn.execute(
-                "SELECT value FROM meta WHERE key = ?",
-                (SCHEMA_VERSION_KEY,),
-            ).fetchone()
-            current = int(row[0]) if row is not None else 0
-            for version, sql in MIGRATIONS:
-                if version <= current:
-                    continue
-                self.conn.execute("BEGIN IMMEDIATE")
+            for attempt in range(20):
                 try:
-                    for stmt in _statements(sql):
-                        self.conn.execute(stmt)
                     self.conn.execute(
-                        "INSERT OR REPLACE INTO meta (key, value)"
-                        " VALUES (?, ?)",
-                        (SCHEMA_VERSION_KEY, str(version)),
+                        "CREATE TABLE IF NOT EXISTS meta ("
+                        "key TEXT PRIMARY KEY, value TEXT)"
                     )
-                    self.conn.execute("COMMIT")
-                except BaseException:
-                    self.conn.execute("ROLLBACK")
-                    raise
+                    for version, sql in MIGRATIONS:
+                        self.conn.execute("BEGIN IMMEDIATE")
+                        try:
+                            row = self.conn.execute(
+                                "SELECT value FROM meta WHERE key = ?",
+                                (SCHEMA_VERSION_KEY,),
+                            ).fetchone()
+                            current = int(row[0]) if row is not None else 0
+                            if version > current:
+                                for stmt in _statements(sql):
+                                    self.conn.execute(stmt)
+                                self.conn.execute(
+                                    "INSERT OR REPLACE INTO meta (key, value)"
+                                    " VALUES (?, ?)",
+                                    (SCHEMA_VERSION_KEY, str(version)),
+                                )
+                            self.conn.execute("COMMIT")
+                        except BaseException:
+                            try:
+                                self.conn.execute("ROLLBACK")
+                            except sqlite3.OperationalError:
+                                pass  # nothing to roll back
+                            raise
+                    return
+                except sqlite3.OperationalError as exc:
+                    message = str(exc).lower()
+                    if "lock" not in message and "busy" not in message:
+                        raise
+                    last = exc
+                    time.sleep(0.01 * (attempt + 1))
+            raise last
 
     # -- ingest --
 
@@ -305,6 +522,10 @@ class Store:
                         session_id, event, ts, rec
                     ):
                         counts["sessions"] += 1
+                    if session_id and event.strip().lower() == (
+                        "userpromptsubmit"
+                    ):
+                        self._maybe_auto_label(session_id, rec)
                     nonce = _approval_nonce(rec)
                     if (
                         event.strip().lower() == "permissionrequest"
@@ -377,6 +598,10 @@ class Store:
                     ts,
                 ),
             )
+            # first sight: the session tags itself with its adapter and
+            # its project label, idempotently, never touching operator
+            # tags (which cannot exist yet: the session is brand new)
+            self._auto_tag_first_sight(session_id, carried)
             return True
         first_seen = row["first_seen"] or ts
         if ts < first_seen:
@@ -424,6 +649,199 @@ class Store:
             ),
         )
         return True
+
+    # -- session auto-identity (W9-L21), all inside the ingest
+    # transaction --
+
+    def _maybe_auto_label(self, session_id, rec) -> None:
+        """Auto-label from the first suitable prompt record.
+
+        Only when the session carries no label yet AND the operator
+        has never touched the label (label_source IS NULL): an
+        operator label always wins, and clearing the label pauses
+        auto-labeling just as much as setting one. An unsuitable
+        record (no prompt text survives) sets nothing, so a later
+        prompt can still name the session.
+        """
+        row = self.conn.execute(
+            "SELECT label, label_source FROM sessions WHERE session_id = ?",
+            (session_id,),
+        ).fetchone()
+        if row is None or row["label"] is not None:
+            return
+        if row["label_source"] is not None:
+            return
+        label = auto_label_from_prompt(
+            prompt_text_from_body(rec.get("body"))
+        )
+        if not label:
+            return
+        self.conn.execute(
+            "UPDATE sessions SET label = ?, label_source = 'auto'"
+            " WHERE session_id = ?",
+            (label, session_id),
+        )
+
+    def _auto_tag_first_sight(self, session_id, carried) -> None:
+        """Tag a brand-new session with its adapter and project label.
+
+        Runs once, at session row creation, from the enrichment the
+        first record carries: a bare first record (no adapter/cwd)
+        leaves the session untagged, and because auto-tags fire only
+        at first sight they can never fight a later operator untag.
+        Normal tag rules apply (lowercase [a-z0-9-]); a project label
+        that normalizes to nothing is skipped.
+        """
+        for tag in _auto_tag_values(carried):
+            self.conn.execute(
+                "INSERT OR IGNORE INTO tags (session_id, tag)"
+                " VALUES (?, ?)",
+                (session_id, tag),
+            )
+
+    # -- ask threads (W9-L21) --
+
+    def _thread_row(self, nonce) -> dict:
+        """One thread row with its options parsed from JSON."""
+        row = self.conn.execute(
+            "SELECT * FROM threads WHERE nonce = ?", (str(nonce),)
+        ).fetchone()
+        if row is None:
+            return {}
+        item = dict(row)
+        item["options"] = _parse_options_json(item.get("options"))
+        return item
+
+    def create_ask_thread(self, session_id, question, options,
+                          nonce=None, ts=None) -> dict:
+        """Open one kind=ask thread carrying the lettered options.
+
+        The options are stored as JSON in the threads row so the
+        console can render the choices and the answer state from the
+        same read. KeyError for a session the store has never seen;
+        ValueError for options that are not a list of 1-8
+        {"key": str, "text": str} objects.
+        """
+        session_id = str(session_id)
+        clean = _validate_ask_options(options)
+        nonce_value = str(nonce) if nonce else uuid.uuid4().hex[:16]
+        with self._lock:
+            self.conn.execute("BEGIN IMMEDIATE")
+            try:
+                row = self.conn.execute(
+                    "SELECT 1 FROM sessions WHERE session_id = ?",
+                    (session_id,),
+                ).fetchone()
+                if row is None:
+                    raise KeyError("unknown session: %r" % session_id)
+                self.conn.execute(
+                    "INSERT INTO threads (nonce, session_id, kind, title,"
+                    " body, created_ts, options) VALUES (?, ?, 'ask', ?,"
+                    " '', ?, ?)",
+                    (
+                        nonce_value,
+                        session_id,
+                        str(question or ""),
+                        ts or _now_iso(),
+                        json.dumps(clean, separators=(",", ":")),
+                    ),
+                )
+                self.conn.execute("COMMIT")
+            except BaseException:
+                self.conn.execute("ROLLBACK")
+                raise
+        return self._thread_row(nonce_value)
+
+    def answer_ask_thread(self, nonce, key, answer_ts=None) -> dict:
+        """Answer an open ask thread with one of its option keys.
+
+        The key matches case-insensitively and lands canonical
+        (upper). ValueError when the thread is not an ask, is not
+        open anymore, or the key is not one of its options (the
+        wrong-key rejection); KeyError for an unknown nonce.
+        """
+        nonce = str(nonce)
+        with self._lock:
+            self.conn.execute("BEGIN IMMEDIATE")
+            try:
+                row = self.conn.execute(
+                    "SELECT kind, status, options FROM threads"
+                    " WHERE nonce = ?",
+                    (nonce,),
+                ).fetchone()
+                if row is None:
+                    raise KeyError("unknown thread nonce: %r" % nonce)
+                if row["kind"] != "ask":
+                    raise ValueError(
+                        "thread %s is not an ask" % nonce
+                    )
+                if row["status"] != "open":
+                    raise ValueError(
+                        "thread %s is already %s" % (nonce, row["status"])
+                    )
+                options = _parse_options_json(row["options"])
+                wanted = str(key or "").strip().upper()
+                match = None
+                for option in options:
+                    if str(option.get("key") or "").upper() == wanted:
+                        match = str(option.get("key"))
+                        break
+                if match is None:
+                    raise ValueError(
+                        "%r is not an option for thread %s (options: %s)"
+                        % (
+                            key,
+                            nonce,
+                            ", ".join(
+                                str(o.get("key")) for o in options
+                            ),
+                        )
+                    )
+                self.conn.execute(
+                    "UPDATE threads SET status = 'answered', answer = ?,"
+                    " answer_ts = ? WHERE nonce = ?",
+                    (match, answer_ts or _now_iso(), nonce),
+                )
+                self.conn.execute("COMMIT")
+            except BaseException:
+                self.conn.execute("ROLLBACK")
+                raise
+        return self._thread_row(nonce)
+
+    def expire_ask_thread(self, nonce) -> bool:
+        """Mark an open ask thread expired; True when it flipped.
+
+        Answered threads and second attempts are no-ops (False).
+        """
+        with self._lock:
+            self.conn.execute("BEGIN IMMEDIATE")
+            try:
+                cur = self.conn.execute(
+                    "UPDATE threads SET status = 'expired'"
+                    " WHERE nonce = ? AND status = 'open'",
+                    (str(nonce),),
+                )
+                flipped = cur.rowcount > 0
+                self.conn.execute("COMMIT")
+            except BaseException:
+                self.conn.execute("ROLLBACK")
+                raise
+        return flipped
+
+    def newest_open_ask(self, session_id) -> str:
+        """The nonce of the session's newest open ask; "" when none.
+
+        This is the binding rule for session-bound replies: a reply
+        aimed at a session (not a thread) resolves to that session's
+        newest open ask, so two concurrent asks never steal each
+        other's answers.
+        """
+        row = self.conn.execute(
+            "SELECT nonce FROM threads WHERE session_id = ? AND kind = 'ask'"
+            " AND status = 'open' ORDER BY created_ts DESC, rowid DESC",
+            (str(session_id),),
+        ).fetchone()
+        return row[0] if row is not None else ""
 
     # -- refresh --
 
@@ -516,8 +934,11 @@ class Store:
 
         The label is stored exactly as given: validation and trimming
         belong to the caller (the console API). An empty value clears
-        the label (NULL). Raises KeyError for a session id the store
-        has never seen. Returns the updated row with its tags.
+        the label (NULL). Both paths record label_source "operator",
+        which permanently pauses auto-labeling for the session: an
+        operator label always wins, and so does an operator clear.
+        Raises KeyError for a session id the store has never seen.
+        Returns the updated row with its tags.
         """
         session_id = str(session_id)
         value = str(label) if label else None
@@ -531,7 +952,8 @@ class Store:
                 if row is None:
                     raise KeyError("unknown session: %r" % session_id)
                 self.conn.execute(
-                    "UPDATE sessions SET label = ? WHERE session_id = ?",
+                    "UPDATE sessions SET label = ?, label_source ="
+                    " 'operator' WHERE session_id = ?",
                     (value, session_id),
                 )
                 self.conn.execute("COMMIT")
@@ -670,8 +1092,31 @@ class Store:
         return {"match": None, "session_id": "",
                 "ambiguous": False, "candidates": []}
 
+    def _identity_maps(self) -> tuple:
+        """Label, tag, and display maps over every session, one read
+        each, so row list endpoints can answer who did what where on
+        every row without per-row queries."""
+        rows = self.conn.execute(
+            "SELECT session_id, label FROM sessions"
+        ).fetchall()
+        ids = [row["session_id"] for row in rows]
+        labels = {}
+        display = {}
+        for row in rows:
+            sid = row["session_id"]
+            labels[sid] = row["label"]
+            display[sid] = session_display_id(sid, row["label"], ids)
+        tags = {}
+        for tag_row in self.conn.execute(
+            "SELECT session_id, tag FROM tags ORDER BY tag"
+        ).fetchall():
+            tags.setdefault(tag_row["session_id"], []).append(
+                tag_row["tag"]
+            )
+        return labels, tags, display
+
     def _session_row(self, session_id) -> dict:
-        """One session row with its tags attached."""
+        """One session row with its tags and display id attached."""
         row = dict(
             self.conn.execute(
                 "SELECT * FROM sessions WHERE session_id = ?",
@@ -679,7 +1124,19 @@ class Store:
             ).fetchone()
         )
         row["tags"] = self._tags_locked(session_id)
+        _, _, display = self._identity_maps()
+        row["display_id"] = display.get(str(session_id), "")
         return row
+
+    def session(self, session_id) -> dict:
+        """One session row (with tags and display id) or None."""
+        found = self.conn.execute(
+            "SELECT 1 FROM sessions WHERE session_id = ?",
+            (str(session_id),),
+        ).fetchone()
+        if found is None:
+            return None
+        return self._session_row(session_id)
 
     def add_reply(self, body, thread_nonce=None, session_id=None,
                   source="console") -> dict:
@@ -753,21 +1210,19 @@ class Store:
     # -- queries --
 
     def sessions(self) -> list:
-        """All sessions, most recently seen first, each with its tags."""
+        """All sessions, most recently seen first, each with its tags
+        and its display id (the one display rule: label when set,
+        else the collision-proof unique suffix)."""
         rows = self.conn.execute(
             "SELECT * FROM sessions ORDER BY last_seen DESC"
         ).fetchall()
-        by_session = {}
-        for tag_row in self.conn.execute(
-            "SELECT session_id, tag FROM tags ORDER BY tag"
-        ).fetchall():
-            by_session.setdefault(tag_row["session_id"], []).append(
-                tag_row["tag"]
-            )
+        _, tags, display = self._identity_maps()
         out = []
         for row in rows:
             item = dict(row)
-            item["tags"] = by_session.get(item["session_id"], [])
+            sid = item["session_id"]
+            item["tags"] = tags.get(sid, [])
+            item["display_id"] = display.get(sid, "")
             out.append(item)
         return out
 
@@ -778,6 +1233,10 @@ class Store:
         with out-of-order timestamps, so id order is not chronological.
         The ISO-8601 strings from datetime.isoformat sort correctly as
         plain text; id DESC tiebreaks identical timestamps.
+
+        Every row also carries its session's identity (label, tags,
+        display_id) so any stream view answers WHO did WHAT WHERE
+        without a second request.
         """
         if session_id is None:
             rows = self.conn.execute(
@@ -790,7 +1249,16 @@ class Store:
                 " ORDER BY ts DESC, id DESC LIMIT ?",
                 (str(session_id), int(limit)),
             ).fetchall()
-        return [dict(row) for row in rows]
+        labels, tags, display = self._identity_maps()
+        out = []
+        for row in rows:
+            item = dict(row)
+            sid = item.get("session_id") or ""
+            item["label"] = labels.get(sid)
+            item["tags"] = tags.get(sid, [])
+            item["display_id"] = display.get(sid, "")
+            out.append(item)
+        return out
 
     def session_detail(self, session_id) -> dict:
         """One session with everything about it, in one read.
@@ -834,7 +1302,10 @@ class Store:
         }
 
     def threads(self, status=None) -> list:
-        """Threads newest first; one status when given."""
+        """Threads newest first; one status when given. Ask rows come
+        back with their options parsed from JSON (None for approve
+        rows and anything unparseable), so one read carries both the
+        choices and the answer state."""
         if status is None:
             rows = self.conn.execute(
                 "SELECT * FROM threads ORDER BY created_ts DESC"
@@ -845,7 +1316,12 @@ class Store:
                 " ORDER BY created_ts DESC",
                 (str(status),),
             ).fetchall()
-        return [dict(row) for row in rows]
+        out = []
+        for row in rows:
+            item = dict(row)
+            item["options"] = _parse_options_json(item.get("options"))
+            out.append(item)
+        return out
 
     def replies(self, limit=50) -> list:
         """Replies newest first."""
@@ -877,5 +1353,17 @@ class Store:
     def _count(self, sql) -> int:
         return int(self.conn.execute(sql).fetchone()[0])
 
+    def display_ids(self) -> dict:
+        """The display id per session id over the whole store (the
+        one display rule), for surfaces that render many rows."""
+        _, _, display = self._identity_maps()
+        return display
+
     def close(self) -> None:
         self.conn.close()
+
+    def __enter__(self) -> "Store":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        self.close()
