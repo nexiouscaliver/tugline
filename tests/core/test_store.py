@@ -52,19 +52,19 @@ def thread_for(store, nonce):
 # -- schema --
 
 
-def test_schema_version_three_and_tables_created(tmp_path):
+def test_schema_version_four_and_tables_created(tmp_path):
     store = open_store(tmp_path)
     version = store.conn.execute(
         "SELECT value FROM meta WHERE key = 'schema_version'"
     ).fetchone()[0]
-    assert version == "3"
+    assert version == "4"
     names = {
         row[0]
         for row in store.conn.execute(
             "SELECT name FROM sqlite_master WHERE type = 'table'"
         )
     }
-    assert {"meta", "sessions", "events", "threads", "replies"} <= names
+    assert {"meta", "sessions", "events", "threads", "replies", "tags"} <= names
     event_cols = {
         row[1] for row in store.conn.execute("PRAGMA table_info(events)")
     }
@@ -90,7 +90,7 @@ def test_version_one_store_migrates_events_columns(tmp_path):
     version = store.conn.execute(
         "SELECT value FROM meta WHERE key = 'schema_version'"
     ).fetchone()[0]
-    assert version == "3"
+    assert version == "4"
     event_cols = {
         row[1] for row in store.conn.execute("PRAGMA table_info(events)")
     }
