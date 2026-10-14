@@ -27,6 +27,21 @@
 <main>
   <section class="panel active" id="sessions-panel" aria-label="sessions">
     <h2>sessions</h2>
+    <div class="filterbar" id="filter-bar">
+      <div class="filter-row">
+        <input id="filter-search" type="text" placeholder="search sessions"
+               aria-label="search sessions" autocomplete="off">
+        <button type="button" class="btn" id="filter-clear" hidden>clear</button>
+      </div>
+      <div class="chiprow" id="filter-chips">
+        <button type="button" class="fchip active" id="filter-chip-all">All</button>
+        <button type="button" class="fchip" id="filter-chip-running">Running</button>
+        <button type="button" class="fchip" id="filter-chip-waiting">Waiting on me</button>
+        <button type="button" class="fchip" id="filter-chip-idle">Idle</button>
+        <button type="button" class="fchip" id="filter-chip-done">Done</button>
+      </div>
+      <p class="filter-count" id="filter-count" hidden></p>
+    </div>
     <div class="scroll">
       <table id="sessions-table">
         <thead>

@@ -9,6 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Markdown rendering for the console's session detail full-text
+  blocks: the last prompt and the last response render through an
+  escape-first renderer (every character of payload text reaches the
+  DOM through textContent, and only whitelisted tags are ever
+  created) supporting fenced code blocks, inline code, bold, italic,
+  http(s)-only links, #..#### headings, unordered and ordered lists,
+  blockquotes, thematic breaks, and paragraphs. Text carrying no
+  markdown construct renders exactly as the old single paragraph did;
+  stream rows and card subtitles stay plain text.
+
+- Sessions filter bar in the console, mobile and desktop: an inline
+  bar at the top of the sessions panel with a case-insensitive search
+  input (label, display id, full session id, adapter, project, and
+  last-event text) and a single-line horizontally scrollable chip row
+  (All, Running, Waiting on me, Idle, Done; Running covers running
+  and active). Filtering is client side on the data in memory, the
+  filter state survives repaints and SSE delta refreshes, a count
+  line reads "N of M sessions" while a filter is active, and the
+  panel empty state becomes "no sessions match the filter" when a
+  filter clears the list.
+
 - Session detail page in the console: tapping a session card (phone)
   or table row (desktop) opens a full detail view with everything
   about the session. Store schema v5 adds

@@ -41,6 +41,14 @@
  * on me, idle, done): the server derives it from recency, so a
  * session whose last event is hours old never shows running. The
  * panel sorts active-now rows first, then by recency.
+ *
+ * The detail prompt and response blocks render through an escape-first
+ * markdown renderer (see its rule comment above renderMarkdown); every
+ * other surface stays plain text. The sessions panel carries an inline
+ * filter bar: a search input (identity fields plus last-event text)
+ * and state chips over the same display_state vocabulary, applied
+ * client side to the rows in memory, with the state kept in memory so
+ * repaints and SSE deltas keep honoring it.
  */
 
 const EVENTS_LIMIT = 50;
@@ -61,6 +69,23 @@ const STATE_TONES = {
   idle: "gray",
   done: "gray",
 };
+
+// Sessions filter bar. Chips read the display_state vocabulary the
+// console already renders; Running covers running AND active (both are
+// live work). The filter lives in memory only and survives repaints,
+// so SSE delta refreshes keep honoring it.
+const FILTER_CHIPS = [
+  { key: "all", label: "All", states: null },
+  { key: "running", label: "Running", states: ["running", "active"] },
+  { key: "waiting", label: "Waiting on me", states: ["waiting"] },
+  { key: "idle", label: "Idle", states: ["idle"] },
+  { key: "done", label: "Done", states: ["done"] },
+];
+const sessionFilter = { text: "", chip: "all" };
+
+function filterActive() {
+  return sessionFilter.text.trim() !== "" || sessionFilter.chip !== "all";
+}
 
 // phones (< 720px) trade the stacked panels for a bottom tab bar: one
 // panel visible at a time, the whole viewport above it scrolls. The
@@ -357,6 +382,176 @@ function idCellContent(session) {
   return wrap;
 }
 
+// -- markdown rendering (detail prompt and response blocks) --
+
+/**
+ * ESCAPE-FIRST RULE: every character of payload text reaches the DOM
+ * through textContent (the DOM-safe equivalent of html-escaping before
+ * any transformation), never through innerHTML, so no text can inject
+ * markup. The only tags ever created are the whitelisted ones below;
+ * fenced code is appended as one verbatim text node with nothing
+ * inside it transformed. No other guarantees are made.
+ *
+ * Supported: ``` fenced code blocks, `inline code`, **bold**, *italic*,
+ * [label](url) links (only http:// and https:// urls become anchors;
+ * anything else renders the label with the url in parentheses),
+ * #..#### headings, "- " / "* " unordered lists, "1. " ordered lists,
+ * "> " blockquotes, --- thematic breaks, paragraphs. Text carrying no
+ * construct at all takes the plain path and renders exactly as the old
+ * single <p> did.
+ */
+
+const MD_HAS_CONSTRUCT = new RegExp(
+  "```" +
+    "|^[ \\t]*#{1,4}\\s+" +
+    "|^[ \\t]*-{3,}$" +
+    "|^[ \\t]*[-*]\\s+" +
+    "|^[ \\t]*\\d+\\.\\s+" +
+    "|^[ \\t]*>" +
+    "|`[^`\\n]+`" +
+    "|\\*\\*[^*\\n]+\\*\\*" +
+    "|\\*[^*\\n]+\\*" +
+    "|\\[[^\\]\\n]+\\]\\([^)\\s]+\\)",
+  "m"
+);
+
+// ordered: code before bold, bold before italic, so ** never reads as
+// two italics; link content cannot span lines
+const MD_INLINE_RULES = [
+  { re: /^`([^`\n]+)`/, make: (m) => el("code", null, m[1]) },
+  { re: /^\*\*([^*\n]+)\*\*/, make: (m) => el("strong", null, m[1]) },
+  { re: /^\*([^*\n]+)\*/, make: (m) => el("em", null, m[1]) },
+  {
+    re: /^\[([^\]\n]+)\]\(([^)\s]+)\)/,
+    make: (m) => {
+      const url = m[2];
+      if (/^https?:\/\//i.test(url)) {
+        const link = el("a", null, m[1]);
+        link.href = url;
+        link.target = "_blank";
+        link.rel = "noopener noreferrer";
+        return link;
+      }
+      return document.createTextNode(m[1] + " (" + url + ")");
+    },
+  },
+];
+
+function mdInline(parent, text) {
+  let rest = String(text);
+  while (rest) {
+    let node = null;
+    for (const rule of MD_INLINE_RULES) {
+      const match = rule.re.exec(rest);
+      if (match) {
+        node = rule.make(match);
+        rest = rest.slice(match[0].length);
+        break;
+      }
+    }
+    if (node) {
+      parent.append(node);
+      continue;
+    }
+    // plain run up to the next possible opener; an unmatched opener at
+    // the scan position is one literal character, so this always ends
+    const next = /[`*[]/.exec(rest);
+    const take = next ? next.index : rest.length;
+    const chunk = take === 0 ? rest.slice(0, 1) : rest.slice(0, take);
+    parent.append(chunk);
+    rest = rest.slice(chunk.length);
+  }
+}
+
+function mdStartsBlock(line) {
+  const t = line.trim();
+  return (
+    t === "" ||
+    t.startsWith("```") ||
+    t.startsWith(">") ||
+    /^#{1,4}\s+/.test(t) ||
+    /^[-*]\s+/.test(t) ||
+    /^\d+\.\s+/.test(t) ||
+    /^-{3,}$/.test(t)
+  );
+}
+
+function renderMarkdown(text) {
+  const root = el("div", "md");
+  const value = String(text || "");
+  if (!value) return root;
+  if (!MD_HAS_CONSTRUCT.test(value)) {
+    // plain path: byte for byte the old single-paragraph block
+    root.append(el("p", null, value));
+    return root;
+  }
+  const lines = value.split("\n");
+  let i = 0;
+  while (i < lines.length) {
+    const t = lines[i].trim();
+    if (t === "") {
+      i += 1;
+    } else if (t.startsWith("```")) {
+      // fence: everything to the closing fence (or the end) is one
+      // verbatim code node; the language tag is ignored
+      i += 1;
+      const buf = [];
+      while (i < lines.length && !lines[i].trim().startsWith("```")) {
+        buf.push(lines[i]);
+        i += 1;
+      }
+      if (i < lines.length) i += 1;
+      const code = el("code", null, buf.join("\n"));
+      const pre = el("pre");
+      pre.append(code);
+      root.append(pre);
+    } else if (/^-{3,}$/.test(t)) {
+      root.append(el("hr"));
+      i += 1;
+    } else if (/^#{1,4}\s+/.test(t)) {
+      const level = t.match(/^#+/)[0].length;
+      const heading = el("h" + level);
+      mdInline(heading, t.replace(/^#{1,4}\s+/, ""));
+      root.append(heading);
+      i += 1;
+    } else if (t.startsWith(">")) {
+      const quote = el("blockquote");
+      while (i < lines.length && lines[i].trim().startsWith(">")) {
+        const stripped = lines[i].trim().replace(/^>\s?/, "");
+        mdInline(quote, stripped);
+        i += 1;
+        if (i < lines.length && lines[i].trim().startsWith(">")) {
+          quote.append(el("br"));
+        }
+      }
+      root.append(quote);
+    } else if (/^[-*]\s+/.test(t) || /^\d+\.\s+/.test(t)) {
+      const ordered = /^\d+\.\s+/.test(t);
+      const list = el(ordered ? "ol" : "ul");
+      const item = ordered ? /^\d+\.\s+/ : /^[-*]\s+/;
+      while (i < lines.length && item.test(lines[i].trim())) {
+        const li = el("li");
+        mdInline(li, lines[i].trim().replace(item, ""));
+        list.append(li);
+        i += 1;
+      }
+      root.append(list);
+    } else {
+      // paragraph: consecutive plain lines keep their line breaks
+      const buf = [lines[i]];
+      i += 1;
+      while (i < lines.length && !mdStartsBlock(lines[i])) {
+        buf.push(lines[i]);
+        i += 1;
+      }
+      const p = el("p");
+      mdInline(p, buf.join("\n"));
+      root.append(p);
+    }
+  }
+  return root;
+}
+
 // -- the session detail page --
 
 function detailHead(session) {
@@ -542,15 +737,14 @@ function detailActions(session) {
   return wrap;
 }
 
+// Full-text blocks only: the prompt and response render through the
+// escape-first markdown renderer; stream rows and card subtitles stay
+// plain single-line text.
 function detailTextBlock(label, text, absentLine) {
   const block = el("section", "detail-block");
   block.append(el("h3", null, label));
   const value = String(text || "");
-  block.append(
-    value
-      ? el("p", "detail-text", value)
-      : el("p", "empty", absentLine)
-  );
+  block.append(value ? renderMarkdown(value) : el("p", "empty", absentLine));
   return block;
 }
 
@@ -646,10 +840,46 @@ function sessionRow(session) {
   return row;
 }
 
+// One session against the active filter: the chip picks display
+// states (Running means running or active), and every whitespace
+// separated search term must appear somewhere across the identity
+// fields and the last-event text. Client side, on the data in memory.
+function filterMatches(session) {
+  const chip =
+    FILTER_CHIPS.find((c) => c.key === sessionFilter.chip) ||
+    FILTER_CHIPS[0];
+  if (chip.states) {
+    const name = String(session.display_state || session.state || "");
+    if (!chip.states.includes(name)) return false;
+  }
+  const terms = sessionFilter.text
+    .trim()
+    .toLowerCase()
+    .split(/\s+/)
+    .filter(Boolean);
+  if (!terms.length) return true;
+  const latest = lastEventFor(session);
+  const haystack = [
+    session.label || "",
+    session.display_id || "",
+    session.session_id || "",
+    session.adapter || "",
+    session.project || "",
+    session.last_event || "",
+    latest ? latest.title || "" : "",
+    latest ? latest.body || "" : "",
+  ]
+    .join(" ")
+    .toLowerCase();
+  return terms.every((term) => haystack.includes(term));
+}
+
 // Adapter and project are empty until field enrichment lands, so the
 // two columns render only when the current data carries at least one
 // non-empty value; the classes are re-derived on every repaint and
-// the columns come back on their own once enriched data arrives.
+// the columns come back on their own once enriched data arrives. The
+// rows come from the filter; the id maps stay built from every
+// session so names resolve everywhere else too.
 function paintSessions() {
   displayIds.clear();
   labels.clear();
@@ -669,8 +899,41 @@ function paintSessions() {
   const table = $("sessions-table");
   table.classList.toggle("no-adapter", !hasAdapter);
   table.classList.toggle("no-project", !hasProject);
-  $("sessions-body").replaceChildren(...state.sessions.map(sessionRow));
-  $("sessions-empty").hidden = state.sessions.length > 0;
+
+  const shown = state.sessions.filter(filterMatches);
+  $("sessions-body").replaceChildren(...shown.map(sessionRow));
+
+  const active = filterActive();
+  $("filter-clear").hidden = !active;
+  const count = $("filter-count");
+  count.hidden = !active;
+  if (active) {
+    count.textContent = shown.length + " of " + state.sessions.length +
+      " sessions";
+  }
+  const empty = $("sessions-empty");
+  empty.hidden = shown.length > 0;
+  empty.textContent =
+    active && state.sessions.length > 0
+      ? "no sessions match the filter"
+      : "no sessions yet; rows appear when a hook spools an event";
+}
+
+function setFilterChip(key) {
+  sessionFilter.chip = key;
+  for (const chip of FILTER_CHIPS) {
+    $("filter-chip-" + chip.key).classList.toggle(
+      "active",
+      chip.key === key
+    );
+  }
+  paintSessions();
+}
+
+function clearFilter() {
+  sessionFilter.text = "";
+  $("filter-search").value = "";
+  setFilterChip("all");
 }
 
 // -- live stream --
@@ -1079,6 +1342,16 @@ async function init() {
 
   for (const tab of TABS) {
     $("tab-" + tab).addEventListener("click", () => showTab(tab));
+  }
+  $("filter-search").addEventListener("input", (event) => {
+    sessionFilter.text = event.target.value;
+    paintSessions(); // instant, client side, on the data in memory
+  });
+  $("filter-clear").addEventListener("click", clearFilter);
+  for (const chip of FILTER_CHIPS) {
+    $("filter-chip-" + chip.key).addEventListener("click", () =>
+      setFilterChip(chip.key)
+    );
   }
   $("detail-back").addEventListener("click", goBackFromDetail);
   $("stream-more").addEventListener("click", () => {
