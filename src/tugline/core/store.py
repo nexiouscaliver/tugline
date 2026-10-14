@@ -55,6 +55,7 @@ import json
 import os
 import sqlite3
 import threading
+import time
 import uuid
 from datetime import datetime, timezone
 
@@ -398,9 +399,31 @@ class Store:
         # without the timeout a concurrent writer makes the very open
         # of a Store fail with "database is locked"
         self.conn.execute("PRAGMA busy_timeout=5000")
-        self.conn.execute("PRAGMA journal_mode=WAL")
+        self._ensure_wal()
         self.conn.execute("PRAGMA foreign_keys=ON")
         self._migrate()
+
+    def _ensure_wal(self):
+        """Set WAL, tolerating concurrent openers.
+
+        Switching into WAL mode is the one statement here that can
+        come back SQLITE_BUSY without consulting the busy timeout
+        (SQLite skips the handler while another connection is mid
+        transition), so a fresh database opened by several processes
+        at once needs the mode checked and the switch retried until
+        the winner's answer sticks.
+        """
+        for attempt in range(20):
+            try:
+                row = self.conn.execute("PRAGMA journal_mode").fetchone()
+                if str(row[0]).lower() == "wal":
+                    return
+                self.conn.execute("PRAGMA journal_mode=WAL")
+            except sqlite3.OperationalError:
+                time.sleep(0.01 * (attempt + 1))  # brief backoff
+                continue  # another opener holds the transition; retry
+        # final attempt outside the loop: raise if it truly will not
+        self.conn.execute("PRAGMA journal_mode=WAL")
 
     # -- schema --
 
