@@ -427,9 +427,11 @@ def _run(event_arg, stdin_text, *, home, env, config_path, out):
     extra = _adapter_extra(normalized, env)
     if event == "stop":
         # the console's session detail shows the last thing this
-        # session said; 600 characters of one-line preview is the
-        # budget (title, body, and priority stay exactly as they were)
-        extra["response_preview"] = payload.one_line_preview(normalized, 600)
+        # session said and renders it as markdown, so the preview keeps
+        # newlines (code blocks and lists must survive) inside a 600
+        # character budget (title, body, and priority stay exactly as
+        # they were)
+        extra["response_preview"] = payload.multiline_preview(normalized, 600)
 
     config = _load_config(config_path)
     if config is None:
