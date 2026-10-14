@@ -16,7 +16,9 @@ so a run without cwd and tool_name degrades exactly as the hook does
 for a payload without those fields: project "unknown", tool
 "tool use". With [toggles] context_titles = false the record must be
 byte-identical to the strings the module emitted before the
-enrichment.
+enrichment, except the session fragment: since the W9 naming parity
+wave it derives from the shared display rule (the last 6 characters),
+never the pre-enrichment first 8.
 """
 
 import io
@@ -52,7 +54,6 @@ CONFIG_CONTEXT_OFF = CONFIG_APPROVE_ON + "context_titles = false\n"
 
 SID = "abc123def456"
 SHORT6 = "def456"
-SHORT8 = "abc123de"
 CWD = "/Users/shahil/work/mission-control"
 
 
@@ -214,5 +215,5 @@ def test_off_record_is_byte_identical_legacy(tmp_path, approvals):
     rec = records_for(tmp_path)[0]
     assert rec["title"] == "permission request"
     assert rec["body"] == (
-        "session %s asks permission, approve or deny from the phone" % SHORT8
+        "session %s asks permission, approve or deny from the phone" % SHORT6
     )

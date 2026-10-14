@@ -9,7 +9,12 @@ project, session, or finished-vs-waiting clarity. The enriched shapes:
   preview, "prompt: ...").
 
 With [toggles] context_titles = false every shape below must be
-byte-identical to the strings the hook emitted before the enrichment.
+byte-identical to the strings the hook emitted before the enrichment,
+except the session fragment: since the W9 naming parity wave it
+derives from the shared display rule (the last 6 characters, the
+population-blind fallback of the console's collision-lengthened
+suffix), never the pre-enrichment first 8, so a hook body always
+carries the token the publish-time naming pass knows how to rewrite.
 """
 
 import json
@@ -43,7 +48,6 @@ CONFIG_CONTEXT_OFF = CONFIG_DEFAULTS + "context_titles = false\n"
 CWD = "/Users/shahil/work/mission-control"
 SID = "abc123def456"
 SHORT6 = "def456"
-SHORT8 = "abc123de"
 
 
 @pytest.fixture
@@ -226,7 +230,7 @@ def test_off_permission_request_is_byte_identical_legacy(home):
     assert code == 0
     rec = spool_records(home)[0]
     assert rec["title"] == "permission request"
-    assert rec["body"] == "session %s: Bash" % SHORT8
+    assert rec["body"] == "session %s: Bash" % SHORT6
 
 
 def test_off_stop_is_byte_identical_legacy(home):
@@ -239,7 +243,7 @@ def test_off_stop_is_byte_identical_legacy(home):
     assert code == 0
     rec = spool_records(home)[0]
     assert rec["title"] == "session stopped"
-    assert rec["body"] == "session %s stopped: stop below threshold and not armed" % SHORT8
+    assert rec["body"] == "session %s stopped: stop below threshold and not armed" % SHORT6
 
 
 def test_off_sessionstart_is_byte_identical_legacy(home):
@@ -252,7 +256,7 @@ def test_off_sessionstart_is_byte_identical_legacy(home):
     assert code == 0
     rec = spool_records(home)[0]
     assert rec["title"] == "session resumed"
-    assert rec["body"] == "session %s resumed" % SHORT8
+    assert rec["body"] == "session %s resumed" % SHORT6
 
 
 def test_off_userpromptsubmit_is_byte_identical_legacy(home):
@@ -275,4 +279,28 @@ def test_off_unmapped_event_is_byte_identical_legacy(home):
     assert code == 0
     rec = spool_records(home)[0]
     assert rec["title"] == "subagentstop"
-    assert rec["body"] == "session %s" % SHORT8
+    assert rec["body"] == "session %s" % SHORT6
+
+
+# -- fragment rule alignment (W9 naming parity) --
+
+
+def test_session_fragment_is_the_suffix_rule_even_on_collision(home):
+    # two sessions can share their last 6 characters; the hook cannot
+    # know that (pure string work, no store access), so it prints the
+    # shared suffix and the publish-time naming pass lengthens it to
+    # the distinct console name
+    code = run_hook(
+        "Stop",
+        {
+            "hookEventName": "Stop",
+            "sessionId": "sess-run1-actor_1_1",
+            "cwd": CWD,
+            "lastAssistantMessage": "done",
+        },
+        config_text=CONFIG_DEFAULTS,
+        home=home,
+    )
+    assert code == 0
+    rec = spool_records(home)[0]
+    assert rec["body"] == "session %s, done" % "or_1_1"

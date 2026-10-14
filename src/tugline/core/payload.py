@@ -72,7 +72,15 @@ def event_name(normalized):
 # formatting; everything they need already sits in the hook payload.
 
 def short_session_id(session_id) -> str:
-    """The last 6 characters of the session id (whole id when shorter)."""
+    """The last 6 characters of the session id (whole id when shorter).
+
+    This is the display rule's fragment for a population of one: the
+    collision-lengthened suffix the console renders (core copy in
+    tugline.core.store.session_display_id) needs the session
+    population, and hooks do pure string work with no store access,
+    so the last 6 is the aligned fallback. The publish-time naming
+    pass rewrites this token to the true display name, so the two can
+    only agree, never contradict."""
     text = str(session_id or "")
     return text[-6:]
 

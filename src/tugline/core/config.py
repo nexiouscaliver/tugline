@@ -14,6 +14,7 @@ token_file   = "<home>/credentials"      # one line: the bearer token
 approve_port = 2587                      # loopback port for the approve receiver
 external_url = ""                        # base the approve buttons point at (empty keeps url)
 console_port = 2588                      # loopback port for the console
+console_url  = ""                        # base session notifications click through to (empty = no click)
 
 [topics]
 main  = "tug"        # routine notifications
@@ -103,6 +104,11 @@ external_url = ""
 # Loopback port the console serves on (0 picks a free port, which
 # tests use).
 console_port = 2588
+# Base URL session-scoped phone notifications click through to, for
+# example the tailnet https host the console is reached at. Empty (the
+# default) means no click header at all. The token never rides in the
+# URL: the console page keeps its own token capture.
+console_url = ""
 
 [topics]
 # main: routine notifications. warn: permission requests, urgent pings.
@@ -182,6 +188,7 @@ _KNOWN = {
         "approve_port": int,
         "external_url": str,
         "console_port": int,
+        "console_url": str,
     },
     "topics": {"main": str, "warn": str, "reply": str},
     "policy": {"idle_seconds": (int, float)},
@@ -212,6 +219,7 @@ _DEFAULTS = {
         "approve_port": 2587,
         "external_url": "",
         "console_port": 2588,
+        "console_url": "",
     },
     "topics": {"main": "tug", "warn": "tug-warn", "reply": "tug-reply"},
     "policy": {"idle_seconds": 600},
@@ -248,6 +256,7 @@ class ServerConfig:
     approve_port: int = 2587
     external_url: str = ""
     console_port: int = 2588
+    console_url: str = ""
 
     @property
     def action_base(self):
@@ -535,6 +544,15 @@ def _build(data, path):
             "config [server] external_url must start with http:// or "
             "https://, or be empty: %s" % path
         )
+    console_url = _check_type(server, "server", "console_url", str, path)
+    if console_url and not (
+        console_url.startswith("http://")
+        or console_url.startswith("https://")
+    ):
+        raise ConfigError(
+            "config [server] console_url must start with http:// or "
+            "https://, or be empty: %s" % path
+        )
     for key in ("main", "warn", "reply"):
         value = _check_type(topics, "topics", key, str, path)
         if not value:
@@ -575,6 +593,7 @@ def _build(data, path):
             approve_port=approve_port,
             external_url=external_url,
             console_port=console_port,
+            console_url=console_url,
         ),
         topics=TopicsConfig(
             main=topics["main"], warn=topics["warn"], reply=topics["reply"]

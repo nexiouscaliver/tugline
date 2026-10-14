@@ -157,7 +157,8 @@ def run(
     The record carries session context through the shared payload
     helpers (same format as the hook records) unless
     [toggles] context_titles is off, which restores the exact legacy
-    strings. cwd and tool_name are optional: when the caller passes
+    strings except the session fragment, always the display rule's
+    last 6 characters. cwd and tool_name are optional: when the caller passes
     neither, the title degrades to the "unknown" project and the tool
     to "tool use", exactly as the hook does for a payload without
     those fields. The phone guidance always stays in the body: it is
@@ -166,7 +167,9 @@ def run(
     sleeper = sleep if sleep is not None else globals()["sleep"]
     now = clock if clock is not None else globals()["monotonic"]
     token = nonce if nonce is not None else new_nonce()
-    short = str(session_id)[:8]
+    # the display rule's population-blind fragment (last 6), so the
+    # pre-publish fallback name agrees with the console naming pass
+    short = payload.short_session_id(session_id)
 
     if config.toggles.context_titles:
         title = payload.context_title(

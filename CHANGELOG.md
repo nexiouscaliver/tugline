@@ -95,6 +95,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rename/tag controls are gone from the session cards (mobile cards
   keep name/id, state, adapter, time, and last event text only);
   every control now lives on the detail page with 44px targets.
+- ntfy detail parity: phone buzzes carry the same identity and
+  detail the web console shows. At publish time the daemon resolves
+  each record's session to the console display name (the label when
+  set, else the collision-lengthened unique suffix, via
+  `tugline.core.store.session_display_id`) through one read-only
+  SELECT over the sessions table per flush pass, rewrites the
+  `session <frag>` token in the body to `session <name>`, and
+  prefixes the title with `[<name>] ` when it does not already carry
+  it; sessions with no store row publish exactly what the hook
+  spooled. Stop records carrying `response_preview` append a blank
+  line plus up to 300 characters of the preview (newlines kept,
+  nothing collapsed). Adapter and project ride along as ntfy tags
+  (lowercase, hyphens for spaces) after the per-event emoji tags;
+  ntfy shows unknown tags as plain text chips. Session-scoped
+  notifications (stop, permissionrequest, resumed sessionstart)
+  carry a click URL from the new optional `[server] console_url`
+  (default empty, validated as http(s) or empty) plus a
+  `#session/<id>` fragment; the shared token never rides in the URL
+  (the console page keeps its own token capture). Hook-time
+  fragments now derive from the display rule (the last 6 characters)
+  instead of the legacy first-8 slice in both adapters (zcode hook
+  and approve paths, claude context-off bodies), so pre-publish
+  fallback names and console names agree.
 
 - Wake-on-reply: a reply bound to a session that lands while the
   session looks idle (its last spooled event a stop or a session
