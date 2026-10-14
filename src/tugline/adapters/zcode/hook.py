@@ -131,7 +131,10 @@ def _session_id(normalized, env):
 
 
 def _short(session_id):
-    return str(session_id)[:8]
+    # the display rule's population-blind fragment (last 6): the hook
+    # does pure string work, and the publish-time naming pass rewrites
+    # this token to the true display name (label or lengthened suffix)
+    return payload.short_session_id(session_id)
 
 
 def _adapter_extra(normalized, env):
@@ -346,7 +349,10 @@ def _record_fields(event, normalized, decision, session_id, context_on, cwd):
     With context_on the title answers, at a glance, which harness,
     which project, and finished versus waiting; the body leads with
     "session <short6>" plus a comma separated detail. With context off
-    the legacy strings come back byte for byte.
+    the legacy strings come back byte for byte except the session
+    fragment, which is always the display rule's last 6 characters
+    (never the pre-W9 first 8) so the publish-time naming pass can
+    rewrite it to the console display name.
     """
     if not context_on:
         return _legacy_record_fields(event, normalized, decision, session_id)

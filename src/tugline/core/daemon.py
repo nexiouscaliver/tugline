@@ -5,7 +5,11 @@ Single-threaded loop:
 1. Flush the spool: every undelivered record is decided by the policy
    and, when it should notify, published over ntfy with retry and
    exponential backoff (attempts capped, backoff doubling up to a
-   ceiling). Handled records are marked delivered and the delivery
+   ceiling). Published records carry console-level detail: the
+   session's display name (one read-only store lookup per flush
+   pass), the stop response preview, adapter and project tags, and a
+   click-through to the console when [server] console_url is set.
+   Handled records are marked delivered and the delivery
    state file is fsynced.
 2. Hold a streaming subscribe on the reply topic
    ({server}/{topic}/json?since={cursor}) and append each message to
@@ -55,6 +59,7 @@ from __future__ import annotations
 import json
 import os
 import signal
+import sqlite3
 import sys
 import time
 import urllib.error
@@ -65,10 +70,19 @@ from datetime import datetime, timezone
 
 from tugline.core import policy, spool, topics
 from tugline.core.publisher import Publisher
+from tugline.core.store import session_display_id
 from tugline.core.wake import WakeDispatcher
 
 DEFAULT_SPOOL_ROOT = os.path.join("~", ".tugline", "spool")
 DEFAULT_REPLIES_PATH = os.path.join("~", ".tugline", "replies.jsonl")
+
+# Publish-time detail parity (W9): how much of a stop record's
+# response_preview rides in the published body, which events are
+# session-scoped enough to click through to the console, and how long
+# the read-only store probe may block when the console is writing.
+PREVIEW_MAX_CHARS = 300
+CLICK_EVENTS = ("stop", "permissionrequest", "sessionstart")
+STORE_READ_TIMEOUT_S = 0.05
 
 
 class Daemon:
@@ -119,16 +133,18 @@ class Daemon:
         # wake-on-reply dispatcher: injected for tests, built from the
         # config when the toggle is on, absent when it is off (exact
         # pre-wake behavior). The store it probes lives next to the
-        # replies journal under the same tugline home.
+        # replies journal under the same tugline home; publish-time
+        # naming reads the same file read-only.
+        home = os.path.dirname(self.replies_path)
+        self._store_path = os.path.join(home, "store", "tugline.db")
         if wake is not None:
             self._wake = wake
         elif getattr(config.toggles, "wake", False):
-            home = os.path.dirname(self.replies_path)
             self._wake = WakeDispatcher(
                 config,
                 replies_path=self.replies_path,
                 state_root=self.state_root,
-                store_path=os.path.join(home, "store", "tugline.db"),
+                store_path=self._store_path,
                 log=self.log,
             )
         else:
@@ -145,16 +161,20 @@ class Daemon:
         Every pass logs one summary line (scanned/handled/published/
         marked/suppressed) so a silently idle or starving flush is
         visible in daemon.err.log (the live 2026-10-13 failure hid
-        behind exactly that silence)."""
+        behind exactly that silence). The records are materialized
+        first so the session naming lookup is one read per pass, not
+        one per record."""
         handled = 0
         misses = 0
         scanned = 0
         published = 0
         suppressed = 0
-        for record in spool.undelivered(self.spool_root, on_error=self.log):
+        records = list(spool.undelivered(self.spool_root, on_error=self.log))
+        names = self._session_display_names(records)
+        for record in records:
             scanned += 1
             try:
-                ok, published_now = self._handle(record)
+                ok, published_now = self._handle(record, names)
             except Exception as exc:  # one bad record, one line, move on
                 self.log("record %s skipped: %s" % (record.get("id"), exc))
                 continue
@@ -177,13 +197,16 @@ class Daemon:
         )
         return handled
 
-    def _handle(self, record):
+    def _handle(self, record, names=None):
         """Decide and finish one record. Returns (ok, published): ok is
         True when the record was marked handled (published or consumed
         as suppressed/state), published is True when a notification
-        actually went out."""
+        actually went out. names is the flush pass's display-name map;
+        a missing entry means the session has no store row and the
+        record publishes exactly as the hook spooled it."""
         if not record.get("id"):
             raise ValueError("record without id")
+        names = names or {}
         name = _record_event(record)
         session_id = str(record.get("session_id") or "")
         ts_epoch = _record_epoch(record)
@@ -213,7 +236,10 @@ class Daemon:
 
         if decision.action == "publish" and self.config.toggles.notify:
             topic = topics.resolve(decision.topic, self.config)
-            if not self._publish_with_retry(topic, record, decision, name):
+            display_name = names.get(session_id) if session_id else None
+            if not self._publish_with_retry(
+                topic, record, decision, name, display_name
+            ):
                 return False, False
 
         self._mark(record)
@@ -221,16 +247,22 @@ class Daemon:
             policy.disarm(session_id, self.state_root)
         return True, decision.action == "publish" and self.config.toggles.notify
 
-    def _publish_with_retry(self, topic, record, decision, event_name) -> bool:
+    def _publish_with_retry(
+        self, topic, record, decision, event_name, display_name=None
+    ) -> bool:
         delay = self.backoff_base
         last_error = "unknown"
+        body, title = _dressed_body_title(record, event_name, display_name)
+        tags = _record_tags(record, event_name)
+        click = _click_url(self.config, event_name, record.get("session_id"))
         for attempt in range(1, self.max_attempts + 1):
             result = self.publisher.publish(
                 topic,
-                record.get("body") or record.get("title") or "",
-                title=record.get("title"),
+                body,
+                title=title,
                 priority=decision.priority or record.get("priority"),
-                tags=topics.tags_for(event_name),
+                tags=tags,
+                click=click,
                 actions=record.get("actions"),
             )
             if result.ok:
@@ -245,6 +277,40 @@ class Daemon:
                 delay = min(delay * 2, self.backoff_cap)
         self.log("publish %s gave up: %s" % (record.get("id"), last_error))
         return False
+
+    def _session_display_names(self, records) -> dict:
+        """{session_id: display name} for the pass's records, one read.
+
+        One read-only SELECT over the sessions table per flush pass:
+        the same rows carry the labels for the ids being published and
+        the full id population the collision rule lengthens against,
+        exactly the population the console renders with. A missing
+        store, a missing table, or any sqlite problem reads as no
+        names, and the records publish exactly as spooled."""
+        wanted = {str(record.get("session_id") or "") for record in records}
+        wanted.discard("")
+        if not wanted or not os.path.exists(self._store_path):
+            return {}
+        try:
+            uri = "file:%s?mode=ro" % urllib.request.pathname2url(
+                self._store_path
+            )
+            conn = sqlite3.connect(uri, uri=True, timeout=STORE_READ_TIMEOUT_S)
+            try:
+                rows = conn.execute(
+                    "SELECT session_id, label FROM sessions"
+                ).fetchall()
+            finally:
+                conn.close()
+        except (OSError, ValueError, sqlite3.Error):
+            return {}
+        population = [str(row[0]) for row in rows]
+        names = {}
+        for row in rows:
+            sid = str(row[0])
+            if sid in wanted:
+                names[sid] = session_display_id(sid, row[1], population)
+        return names
 
     def _mark(self, record):
         spool.mark_delivered(self.spool_root, record.get("id"))
@@ -575,6 +641,98 @@ class Daemon:
 def _record_event(record) -> str:
     name = record.get("event") or record.get("hook_event_name") or ""
     return str(name).strip().lower()
+
+
+# -- publish-time detail parity (W9), pure helpers --
+
+def _hook_fragments(session_id) -> list:
+    """The session fragments a hook-time body may carry, best first.
+
+    Hooks derive the token with pure string work: the display rule's
+    last 6 characters today, the pre-W9 first 8 or the whole id in
+    records spooled before the alignment. All three spellings are
+    listed so the publish-time rewrite finds whichever one the body
+    actually carries."""
+    text = str(session_id or "")
+    fragments = []
+    for fragment in (text[-6:], text[:8], text):
+        if fragment and fragment not in fragments:
+            fragments.append(fragment)
+    return fragments
+
+
+def _rewrite_session_token(body, session_id, display_name) -> str:
+    """Swap the body's "session <frag>" token for the display name.
+
+    Only the first occurrence is rewritten; a body without the token
+    (an operator notify body, a raw prompt) passes through untouched."""
+    for fragment in _hook_fragments(session_id):
+        token = "session %s" % fragment
+        if token in body:
+            return body.replace(token, "session %s" % display_name, 1)
+    return body
+
+
+def _dressed_body_title(record, event_name, display_name):
+    """The published body and title for one record.
+
+    Naming: when the session resolved to a display name (label or
+    collision-lengthened suffix, the same rule the console renders),
+    the "session <frag>" token the hook wrote becomes
+    "session <name>" and the title gains a "[<name>] " prefix it does
+    not already carry; sessions with no store row publish exactly what
+    the hook spooled. Stop records then append their response preview:
+    a blank line plus up to PREVIEW_MAX_CHARS characters, newlines
+    kept, nothing collapsed (the phone renders multi-line bodies)."""
+    body = str(record.get("body") or record.get("title") or "")
+    title = record.get("title")
+    if display_name:
+        body = _rewrite_session_token(
+            body, record.get("session_id"), display_name
+        )
+        if title and ("[%s]" % display_name) not in str(title):
+            title = "[%s] %s" % (display_name, title)
+    if event_name == "stop":
+        preview = str(record.get("response_preview") or "")
+        if preview:
+            body = "%s\n\n%s" % (body, preview[:PREVIEW_MAX_CHARS])
+    return body, title
+
+
+def _record_tags(record, event_name) -> list:
+    """Per-event tags plus the record's adapter and project as tags.
+
+    ntfy renders unknown tags as plain text chips in the app, so the
+    adapter and project ride along lowercase with hyphens for spaces,
+    merged after the emoji tags without duplicates."""
+    tags = topics.tags_for(event_name)
+    for key in ("adapter", "project"):
+        value = str(record.get(key) or "").strip().lower().replace(" ", "-")
+        if value and value not in tags:
+            tags.append(value)
+    return tags
+
+
+def _click_url(config, event_name, session_id):
+    """The console deep link for session-scoped notifications.
+
+    Only stop, permissionrequest, and sessionstart records carry a
+    click (policy publishes sessionstart only for a resume), and only
+    when [server] console_url is set; the empty default means no
+    click, so nothing changes for existing installs. The shared token
+    never rides in the URL: the console page keeps its own token
+    capture."""
+    base = str(getattr(config.server, "console_url", "") or "")
+    base = base.strip().rstrip("/")
+    if not base or event_name not in CLICK_EVENTS:
+        return None
+    session_id = str(session_id or "")
+    if session_id:
+        return "%s#session/%s" % (
+            base,
+            urllib.parse.quote(session_id, safe=""),
+        )
+    return base
 
 
 def _record_epoch(record) -> float:

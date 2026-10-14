@@ -20,7 +20,10 @@ on stdin. This module is the tugline side of that contract:
 - titles and bodies carry session context ("[claude] project - turn
   finished", body leading "session <short6>") unless the
   [toggles] context_titles switch is off, which restores the exact
-  strings from before the enrichment,
+  strings from before the enrichment except the session fragment:
+  since the W9 naming parity wave it is always the display rule's
+  last 6 characters, so a hook body carries the token the
+  publish-time naming pass knows how to rewrite,
 - UserPromptSubmit injects unread operator replies into the session
   through Claude Code's documented context channel (one JSON object
   with hookSpecificOutput.additionalContext on stdout), so a running
@@ -409,7 +412,9 @@ def _run(event_name, stdin) -> int:
             body = payload_module.context_body(session, "resumed")
         else:
             title = "claude session resumed"
-            body = "session %s resumed" % session
+            body = "session %s resumed" % payload_module.short_session_id(
+                session
+            )
         spool.append(
             paths.spool_root(),
             event="notify",
@@ -432,7 +437,9 @@ def _run(event_name, stdin) -> int:
             body = payload_module.context_body(session, detail)
         else:
             title = "claude turn finished"
-            body = "session %s turn finished" % session
+            body = "session %s turn finished" % payload_module.short_session_id(
+                session
+            )
         # the console's session detail shows the last thing this
         # session said; 600 characters of one-line preview is the
         # budget (title, body, and priority stay exactly as they were)
