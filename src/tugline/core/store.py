@@ -394,37 +394,46 @@ class Store:
         )
         self.conn.row_factory = sqlite3.Row
         self._lock = threading.Lock()
-        self.conn.execute("PRAGMA journal_mode=WAL")
+        # busy_timeout FIRST: journal_mode wants a lock too, and
+        # without the timeout a concurrent writer makes the very open
+        # of a Store fail with "database is locked"
         self.conn.execute("PRAGMA busy_timeout=5000")
+        self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA foreign_keys=ON")
         self._migrate()
 
     # -- schema --
 
     def _migrate(self):
-        """Apply pending migrations in order, one transaction each."""
+        """Apply pending migrations in order, one transaction each.
+
+        The version is re-read INSIDE each write transaction: two
+        Store() opens racing on the same file (the console's ingest
+        thread and a CLI command, say) serialize on BEGIN IMMEDIATE,
+        and the loser then sees the winner's version and skips
+        instead of replaying applied migrations.
+        """
         with self._lock:
             self.conn.execute(
                 "CREATE TABLE IF NOT EXISTS meta ("
                 "key TEXT PRIMARY KEY, value TEXT)"
             )
-            row = self.conn.execute(
-                "SELECT value FROM meta WHERE key = ?",
-                (SCHEMA_VERSION_KEY,),
-            ).fetchone()
-            current = int(row[0]) if row is not None else 0
             for version, sql in MIGRATIONS:
-                if version <= current:
-                    continue
                 self.conn.execute("BEGIN IMMEDIATE")
                 try:
-                    for stmt in _statements(sql):
-                        self.conn.execute(stmt)
-                    self.conn.execute(
-                        "INSERT OR REPLACE INTO meta (key, value)"
-                        " VALUES (?, ?)",
-                        (SCHEMA_VERSION_KEY, str(version)),
-                    )
+                    row = self.conn.execute(
+                        "SELECT value FROM meta WHERE key = ?",
+                        (SCHEMA_VERSION_KEY,),
+                    ).fetchone()
+                    current = int(row[0]) if row is not None else 0
+                    if version > current:
+                        for stmt in _statements(sql):
+                            self.conn.execute(stmt)
+                        self.conn.execute(
+                            "INSERT OR REPLACE INTO meta (key, value)"
+                            " VALUES (?, ?)",
+                            (SCHEMA_VERSION_KEY, str(version)),
+                        )
                     self.conn.execute("COMMIT")
                 except BaseException:
                     self.conn.execute("ROLLBACK")

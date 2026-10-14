@@ -152,12 +152,18 @@ def test_ask_answers_from_a_console_reply_while_blocking(home, fake_ntfy,
     deadline = time.monotonic() + 10
     nonce = None
     while time.monotonic() < deadline:
-        with store(home) as opened:  # context manager closes the conn
+        # read-only polling: the ask thread writes its thread row
+        # straight into the store, so this open never needs to fold
+        # the spool (and never takes the write lock against it)
+        opened = Store(paths.store_path())
+        try:
             asks = [t for t in opened.threads() if t["kind"] == "ask"]
-            if asks:
-                nonce = asks[0]["nonce"]
-                break
-        time.sleep(0.05)
+        finally:
+            opened.close()
+        if asks:
+            nonce = asks[0]["nonce"]
+            break
+        time.sleep(0.1)
     assert nonce, "the ask thread never appeared in the store"
     with store(home) as opened:
         opened.add_reply("b", thread_nonce=nonce, source="console")

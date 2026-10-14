@@ -671,3 +671,36 @@ def test_fresh_store_is_schema_version_five(tmp_path):
     }
     assert "label_source" in session_cols
     store.close()
+
+
+def test_concurrent_opens_migrate_exactly_once(tmp_path):
+    """Two Store() opens racing on a fresh file must not replay
+    applied migrations (the console's ingest thread and a CLI
+    command are the real pair)."""
+    import threading
+
+    path = tmp_path / "store" / "tugline.db"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    errors = []
+    barrier = threading.Barrier(4)
+
+    def opener():
+        try:
+            barrier.wait(timeout=5)
+            opened = Store(path)
+            opened.close()
+        except Exception as exc:  # recorded, asserted below
+            errors.append(repr(exc))
+
+    threads = [threading.Thread(target=opener) for _ in range(4)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+    assert errors == []
+    store = Store(path)
+    version = store.conn.execute(
+        "SELECT value FROM meta WHERE key = 'schema_version'"
+    ).fetchone()[0]
+    assert version == "5"
+    store.close()
