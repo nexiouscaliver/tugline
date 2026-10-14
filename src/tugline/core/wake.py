@@ -13,10 +13,10 @@ after the spool flush:
    line; free-form phone replies stay on the injection path).
 3. For each new bound reply, exactly one decision, deduped on the
    reply id and relearned from the wake journal on restart:
-   - the session's adapter has no driver (zcode today) or the adapter
+   - the session's adapter has no driver or the adapter
      is not enabled: log "wake unsupported for adapter X, reply
      queued for next-boundary injection" and leave the reply
-     unconsumed for the W7-L17 path;
+   unconsumed for the W7-L17 path;
    - the session is busy (last spooled event is not a stop or a
      session start, or a wake is already in flight for it): same
      fallback, no wake;
@@ -32,10 +32,13 @@ records the exact command without spawning anything (the ship
 default; the controller arms it after live verification), and no
 failure path may ever raise into the daemon.
 
-The claude driver template is config-driven (wake.claude_command);
-its flag order is verified against claude --help v2.1.299, where the
-resume-with-prompt parse error itself prints the usage:
-"claude -p --resume <session-id|title>".
+Driver templates are config-driven (wake.claude_command,
+wake.zcode_command). The claude flag order is verified against
+claude --help v2.1.299, where the resume-with-prompt parse error
+itself prints the usage: "claude -p --resume <session-id|title>".
+The zcode flags are verified against the app-bundled CLI's own help
+(v0.16.9: -p, --resume, --cwd; --mode left at its documented
+--prompt default, yolo).
 
 The store is probed read-only (the console's ingest thread keeps it
 current within its interval); a missing, busy, or broken store means
@@ -64,15 +67,39 @@ DEFAULT_CLAUDE_COMMAND = [
     "{body}",
 ]
 
-# argv templates per adapter. claude is the config-driven template;
-# adapters without an entry (zcode until its driver lane lands; the
-# app-bundled zcode.cjs CLI with -p/--resume/--cwd is the documented
-# seam for it) take the "unsupported" path, so the registry stays a
-# one-liner.
+# The verified zcode resume-with-prompt form, run through node
+# because the app ships a .cjs bundle, not an executable. Flags
+# checked against the bundled CLI's own help (v0.16.9): -p, --prompt
+# <text> runs a single prompt without opening the TUI, --resume
+# <sessionId> resumes a persisted session, --cwd <path> sets the
+# working directory. --mode is deliberately absent: help documents
+# yolo as the default permission mode for --prompt. The path is the
+# ZCode.app-bundled CLI, so it is version-locked to the installed
+# app and moves with it; wake.zcode_command is the override seam.
+DEFAULT_ZCODE_COMMAND = [
+    "node",
+    "/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs",
+    "--resume",
+    "{session}",
+    "-p",
+    "{body}",
+    "--cwd",
+    "{cwd}",
+]
+
+# argv templates per adapter, from the wake config's command keys.
+# Adapters without an entry take the "unsupported" path.
+DRIVER_COMMAND_KEYS = {
+    "claude": "claude_command",
+    "zcode": "zcode_command",
+}
+
+
 def driver_command(adapter, wake_config):
-    if adapter == "claude":
-        return list(wake_config.claude_command)
-    return None
+    key = DRIVER_COMMAND_KEYS.get(adapter)
+    if key is None:
+        return None
+    return list(getattr(wake_config, key))
 
 
 REPLY_TAIL_BYTES = 262144  # the journal tail scanned for bound replies
@@ -202,13 +229,18 @@ class WakeDispatcher:
 
     def _dispatch(self, entry, session_id, adapter, row, command) -> bool:
         rid = entry["id"]
+        cwd = str(row.get("cwd") or "") or None
+        # {cwd} feeds the zcode --cwd flag; a row from before the cwd
+        # enrichment gets the user's home rather than an empty string
+        # (the daemon's own cwd would be meaningless to a resumed
+        # session). Templates without {cwd} never see it.
+        cwd_value = cwd or os.path.expanduser("~")
         argv = [
-            part.replace("{session}", session_id).replace(
-                "{body}", str(entry.get("body") or "")
-            )
+            part.replace("{session}", session_id)
+            .replace("{body}", str(entry.get("body") or ""))
+            .replace("{cwd}", cwd_value)
             for part in command
         ]
-        cwd = str(row.get("cwd") or "") or None
         dry = bool(self.config.wake.dry_run)
         if dry:
             self._seen.add(rid)

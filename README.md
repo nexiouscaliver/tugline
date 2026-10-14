@@ -154,7 +154,13 @@ a reply two ways, and they compose:
   body as the prompt, resuming the session on the spot. For claude
   sessions that is `claude --resume <session> -p "<your reply>"`
   (flag order verified against the CLI's own help), run in the
-  session's project directory. The woken reply is marked consumed so
+  session's project directory. For zcode sessions that is
+  `node /Applications/ZCode.app/Contents/Resources/glm/zcode.cjs
+  --resume <session> -p "<your reply>" --cwd <project dir>`, through
+  the CLI the ZCode app bundles (v0.16.9; `-p` runs one prompt
+  without opening the TUI, `--resume` takes the sessionId, `--cwd`
+  sets the working directory, and `--mode` stays at its documented
+  `--prompt` default, yolo). The woken reply is marked consumed so
   the injection path never double-delivers it.
 
 Rails: one wake per reply, one wake in flight per session, a global
@@ -166,16 +172,16 @@ behavior exactly. `wake.dry_run = true` (the shipped default) records
 the exact command without spawning anything: check
 `~/.tugline/state/wake.jsonl`, then flip it to false to arm.
 
-One honest limitation: this change ships no zcode wake driver. The
-ZCode desktop app does bundle a CLI (ZCode.app/Contents/Resources/
-glm/zcode.cjs, v0.16.9) whose help documents headless resume flags
-(`-p, --prompt <text>`, `--resume <sessionId>`, `--cwd <path>`), but
-wiring that driver is a queued follow-up lane; until it lands,
-replies to idle zcode sessions are logged unsupported and stay queued
-for the session's next-boundary injection. The driver registry
-(`wake.adapters`) and the claude command template
-(`wake.claude_command`) are config-driven, so the zcode driver is an
-additive change when it lands. Details:
+Both drivers ship enabled: `wake.adapters` defaults to
+`["claude", "zcode"]`, and each command template is config-driven
+(`wake.claude_command`, `wake.zcode_command`), so a moved binary or
+a different install is a config edit, not a code change. One thing
+to know about the zcode path: it invokes the app-bundled CLI
+(`/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs`), so it
+is version-locked to the installed ZCode app and must be re-pointed
+in config if the app bundle moves it. An adapter with no driver
+(anything but claude and zcode) is logged unsupported and stays
+queued for the session's next-boundary injection. Details:
 [docs/console.md](docs/console.md#wake-on-reply).
 
 ## Privacy

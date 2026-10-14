@@ -67,12 +67,11 @@ they happened.
   spawned with the reply as its prompt), finished (the driver exited;
   the chip replaces dispatched), timed_out (the per-wake timeout
   killed it), unsupported (the target session's adapter has no wake
-  driver yet; zcode until its driver lane lands), or skipped (the
-  session was busy or a wake was already in flight, so the reply
-  waits for the session's own next-boundary injection). No chip means
-  no wake decision was ever recorded for that reply, which is the
-  honest reading for anything sent before the feature or while the
-  daemon is stopped.
+  driver), or skipped (the session was busy or a wake was already in
+  flight, so the reply waits for the session's own next-boundary
+  injection). No chip means no wake decision was ever recorded for
+  that reply, which is the honest reading for anything sent before
+  the feature or while the daemon is stopped.
 - Header health: daemon running, stopped, or unknown; ntfy ok or
   unreachable; how many spool records are pending; how long since the
   last ingest; and a live or reconnecting chip for the event stream
@@ -188,18 +187,25 @@ The pieces:
   would run before arming it. Flip it to false in
   `~/.tugline/config.toml` once the journal looks right.
 
-The zcode limitation, stated plainly: this change ships no zcode wake
-driver. The ZCode desktop app does bundle a CLI
-(ZCode.app/Contents/Resources/glm/zcode.cjs, v0.16.9) whose help
-documents headless resume flags (`-p, --prompt <text>`, `--resume
-<sessionId>`, `--cwd <path>`; verified against the binary), but
-wiring that driver is a queued follow-up lane. Until it lands,
-replies to idle zcode sessions log `wake unsupported for adapter
-zcode`, show the unsupported chip, and stay unconsumed until the
-session's own next-boundary injection picks them up. The driver
-registry is config-driven (`wake.adapters`), so the zcode driver is
-an additive change when it lands; claude is the enabled driver by
-default, with the command template in `wake.claude_command`.
+The zcode driver, stated plainly: idle zcode sessions wake through
+the CLI the ZCode desktop app bundles, invoked as
+`node /Applications/ZCode.app/Contents/Resources/glm/zcode.cjs
+--resume <sessionId> -p "<reply body>" --cwd <project dir>`
+(v0.16.9; every flag verified against the bundled CLI's own help:
+`-p, --prompt <text>` runs a single prompt without opening the TUI,
+`--resume <sessionId>` resumes a persisted session, `--cwd <path>`
+sets the working directory; `--mode` is deliberately not passed
+because help documents yolo as the default permission mode for
+`--prompt`). Because that path is the app-bundled CLI, the driver is
+version-locked to the installed ZCode app: if an app update moves or
+renames the bundle, re-point `wake.zcode_command` in
+`~/.tugline/config.toml`. Both drivers ship enabled
+(`wake.adapters` defaults to `["claude", "zcode"]`), each with its
+config-driven command template (`wake.claude_command`,
+`wake.zcode_command`); an adapter with no driver entry logs
+`wake unsupported for adapter X`, shows the unsupported chip, and
+stays unconsumed until the session's own next-boundary injection
+picks it up.
 
 ## Naming sessions from a shell
 

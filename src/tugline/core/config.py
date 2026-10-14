@@ -37,7 +37,7 @@ wake    = true    # wake idle sessions the moment a bound reply lands
 # start), the daemon spawns the adapter's driver with the reply body
 # as the prompt, resuming the session at once instead of waiting for
 # the next turn. Off restores the pre-wake behavior exactly.
-adapters = ["claude"]  # adapters with a wake driver (zcode has none)
+adapters = ["claude", "zcode"]  # adapters with a wake driver
 dry_run = true         # log and record the exact command without spawning
 timeout_seconds = 1800 # one wake is killed after this many seconds
 max_concurrent = 1     # global cap on wakes running at once
@@ -47,6 +47,16 @@ claude_command = [
   "{session}",
   "-p",
   "{body}",
+]
+zcode_command = [
+  "node",
+  "/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs",
+  "--resume",
+  "{session}",
+  "-p",
+  "{body}",
+  "--cwd",
+  "{cwd}",
 ]
 
 Anything unknown, missing a section header, or typed wrong is a loud
@@ -62,7 +72,7 @@ import os
 from dataclasses import dataclass, field
 
 from tugline.core import paths
-from tugline.core.wake import DEFAULT_CLAUDE_COMMAND
+from tugline.core.wake import DEFAULT_CLAUDE_COMMAND, DEFAULT_ZCODE_COMMAND
 
 try:
     import tomllib
@@ -128,9 +138,8 @@ wake = true
 # session looks idle (its last spooled event is a stop or a session
 # start), the daemon spawns the adapter's driver with the reply body
 # as the prompt, resuming the session on the spot.
-# Adapters with a wake driver. zcode has none today: replies to idle
-# zcode sessions are queued for next-boundary injection instead.
-adapters = ["claude"]
+# Adapters with a wake driver.
+adapters = ["claude", "zcode"]
 # Safe-live-proof mode: log and record the exact command without
 # spawning anything. Flip to false after checking the wake journal.
 dry_run = true
@@ -147,6 +156,22 @@ claude_command = [
   "{session}",
   "-p",
   "{body}",
+]
+# The zcode driver command, run through node (the app ships a .cjs
+# bundle, not an executable). {session}, {body}, and {cwd} are
+# substituted at dispatch; the flags are verified against the
+# bundled CLI's own help (v0.16.9: -p, --resume, --cwd; --mode left
+# at its documented --prompt default, yolo). The path is the
+# ZCode.app-bundled CLI, version-locked to the installed app.
+zcode_command = [
+  "node",
+  "/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs",
+  "--resume",
+  "{session}",
+  "-p",
+  "{body}",
+  "--cwd",
+  "{cwd}",
 ]
 """
 
@@ -176,6 +201,7 @@ _KNOWN = {
         "timeout_seconds": (int, float),
         "max_concurrent": int,
         "claude_command": list,
+        "zcode_command": list,
     },
 }
 
@@ -198,11 +224,12 @@ _DEFAULTS = {
         "wake": True,
     },
     "wake": {
-        "adapters": ["claude"],
+        "adapters": ["claude", "zcode"],
         "dry_run": True,
         "timeout_seconds": 1800,
         "max_concurrent": 1,
         "claude_command": DEFAULT_CLAUDE_COMMAND,
+        "zcode_command": DEFAULT_ZCODE_COMMAND,
     },
 }
 
@@ -256,20 +283,24 @@ class TogglesConfig:
 class WakeConfig:
     """Wake-on-reply settings (the optional [wake] section).
 
-    claude_command is an argv template: {session} and {body} are
-    substituted at dispatch time."""
+    claude_command and zcode_command are argv templates: {session}
+    and {body} are substituted at dispatch time, plus {cwd} (the
+    session's project directory) for the zcode --cwd flag."""
 
     adapters: list = None
     dry_run: bool = True
     timeout_seconds: float = 1800.0
     max_concurrent: int = 1
     claude_command: list = None
+    zcode_command: list = None
 
     def __post_init__(self):
         if self.adapters is None:
-            self.adapters = ["claude"]
+            self.adapters = ["claude", "zcode"]
         if self.claude_command is None:
             self.claude_command = list(DEFAULT_CLAUDE_COMMAND)
+        if self.zcode_command is None:
+            self.zcode_command = list(DEFAULT_ZCODE_COMMAND)
 
 
 @dataclass
@@ -516,14 +547,15 @@ def _build(data, path):
         _check_type(toggles, "toggles", key, bool, path)
 
     adapters = _check_wake_strings(wake, "adapters", path)
-    command = _check_wake_strings(wake, "claude_command", path)
-    if not any("{session}" == part for part in command) or not any(
-        "{body}" == part for part in command
-    ):
-        raise ConfigError(
-            "config [wake] claude_command needs a {session} and a {body}"
-            " argv entry: %s" % path
-        )
+    for key in ("claude_command", "zcode_command"):
+        command = _check_wake_strings(wake, key, path)
+        if not any("{session}" == part for part in command) or not any(
+            "{body}" == part for part in command
+        ):
+            raise ConfigError(
+                "config [wake] %s needs a {session} and a {body}"
+                " argv entry: %s" % (key, path)
+            )
     timeout = _check_type(wake, "wake", "timeout_seconds", (int, float), path)
     if isinstance(timeout, bool) or timeout <= 0:
         raise ConfigError(
@@ -561,7 +593,8 @@ def _build(data, path):
             dry_run=dry_run,
             timeout_seconds=float(timeout),
             max_concurrent=max_concurrent,
-            claude_command=command,
+            claude_command=list(wake["claude_command"]),
+            zcode_command=list(wake["zcode_command"]),
         ),
         path=path,
     )
