@@ -302,3 +302,36 @@ def test_external_url_must_be_http_or_empty(home):
     with pytest.raises(cfg.ConfigError) as exc:
         cfg.load_config()
     assert "external_url" in str(exc.value)
+
+
+# console click-through base (W9 detail parity)
+
+
+def test_console_url_defaults_empty(home):
+    conf = cfg.load_config()
+    assert conf.server.console_url == ""
+
+
+def test_console_url_loaded_when_https(home):
+    write_config(
+        home / ".tugline" / "config.toml",
+        CUSTOM.replace(
+            'token_file = "~/.tugline/my-creds"',
+            'token_file = "~/.tugline/my-creds"\nconsole_url = "https://tug.tailnet.example"',
+        ),
+    )
+    conf = cfg.load_config()
+    assert conf.server.console_url == "https://tug.tailnet.example"
+
+
+def test_console_url_must_be_http_or_empty(home):
+    write_config(
+        home / ".tugline" / "config.toml",
+        CUSTOM.replace(
+            'token_file = "~/.tugline/my-creds"',
+            'token_file = "~/.tugline/my-creds"\nconsole_url = "ftp://tug.tailnet.example"',
+        ),
+    )
+    with pytest.raises(cfg.ConfigError) as exc:
+        cfg.load_config()
+    assert "console_url" in str(exc.value)

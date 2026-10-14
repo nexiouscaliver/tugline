@@ -12,7 +12,12 @@ with no session or project) become:
   "permission: <tool> <summary>" for plain permission records).
 
 With [toggles] context_titles = false every shape below must be
-byte-identical to the strings the hook emitted before the enrichment.
+byte-identical to the strings the hook emitted before the enrichment,
+except the session fragment: since the W9 naming parity wave it
+derives from the shared display rule (the last 6 characters, the
+population-blind fallback of the console's collision-lengthened
+suffix), never the full session id, so a hook body always carries the
+token the publish-time naming pass knows how to rewrite.
 """
 
 import io
@@ -197,7 +202,7 @@ def test_off_stop_is_byte_identical_legacy(titles_home, write_config):
     assert run("Stop", payload_for("Stop", last_assistant_message="no preview")) == 0
     rec = spool_records(titles_home)[0]
     assert rec["title"] == "claude turn finished"
-    assert rec["body"] == "session %s turn finished" % SID
+    assert rec["body"] == "session %s turn finished" % SHORT6
 
 
 def test_off_session_start_resume_is_byte_identical_legacy(titles_home, write_config):
@@ -205,7 +210,7 @@ def test_off_session_start_resume_is_byte_identical_legacy(titles_home, write_co
     assert run("SessionStart", payload_for("SessionStart", source="resume")) == 0
     rec = spool_records(titles_home)[0]
     assert rec["title"] == "claude session resumed"
-    assert rec["body"] == "session %s resumed" % SID
+    assert rec["body"] == "session %s resumed" % SHORT6
 
 
 def test_off_idle_notification_is_byte_identical_legacy(titles_home, write_config):
