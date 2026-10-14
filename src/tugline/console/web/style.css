@@ -132,6 +132,8 @@ main {
 }
 
 @media (min-width: 720px) {
+  /* the phone tab bar has no business at desktop width */
+  .tabbar { display: none; }
   main {
     grid-template-columns: minmax(0, 7fr) minmax(0, 5fr);
     grid-template-areas:
@@ -688,7 +690,7 @@ textarea:disabled { opacity: 0.45; }
   .ask-line .tx { order: 2; flex-basis: 100%; white-space: normal; overflow: visible; }
   .ask-line .btn-approve { order: 3; }
   .ask-line .btn-deny { order: 4; }
-  .ask-line .btn-approve, .ask-line .btn-deny { flex: 1 1 40%; min-height: 44px; font-size: 0.95rem; }
+  .ask-line .btn-approve, .ask-line .btn-deny { flex: 1 1 100%; min-height: 48px; font-size: 1rem; }
   .ask-line .linkish { order: 5; flex-basis: 100%; min-height: 44px; display: flex; align-items: center; font-size: 0.95rem; }
   .settled .tx { white-space: normal; overflow: visible; }
 
