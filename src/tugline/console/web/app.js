@@ -22,12 +22,37 @@
  * them rather than ever showing a false "pending"). Everything else
  * shows pending (delivered 0) or delivered (delivered 1), where
  * delivered means the daemon handled the record, published or not.
+ *
+ * Session identity is operator-first: each row carries a rename
+ * affordance backed by PUT /api/sessions/<id>/label, and when a label
+ * is set it is the primary name (the id drops to a small secondary
+ * line). Ids shown anywhere are display_id values computed per
+ * response by the server: suffixes lengthened until unique, so two
+ * sessions sharing a tail never render the same short id. State chips
+ * read display_state (active now, running, waiting on me, idle,
+ * done): the server derives it from recency, so a session whose last
+ * event is hours old never shows running. The panel sorts active-now
+ * rows first, then by recency.
  */
 
 const EVENTS_LIMIT = 50;
 const RECENT_REPLIES_SHOWN = 5;
 const STATE_REFRESH_MS = 30000;
 const STATE_ONLY_EVENTS = new Set(["userpromptsubmit", "sessionstart"]);
+const STATE_LABELS = {
+  active: "active now",
+  running: "running",
+  waiting: "waiting on me",
+  idle: "idle",
+  done: "done",
+};
+const STATE_TONES = {
+  active: "green",
+  running: "green",
+  waiting: "amber",
+  idle: "gray",
+  done: "gray",
+};
 
 // phones (< 720px) trade the stacked panels for a bottom tab bar: one
 // panel visible at a time, the whole viewport above it scrolls. The
@@ -74,6 +99,21 @@ function withToken(path) {
 function short8(value) {
   const text = String(value || "");
   return text.slice(0, 8) || "-";
+}
+
+// per-response display names, rebuilt on every sessions repaint: the
+// server computed each display_id to be unique within the response,
+// and labels ride on the same rows
+const displayIds = new Map();
+const labels = new Map();
+
+function sid(sessionId) {
+  return displayIds.get(sessionId) || short8(sessionId);
+}
+
+function targetName(sessionId) {
+  const label = labels.get(sessionId);
+  return label ? label + " (" + sid(sessionId) + ")" : sid(sessionId);
 }
 
 function parseTs(iso) {
@@ -214,10 +254,12 @@ function paintFreshness() {
 
 // -- sessions panel --
 
-function stateCell(value) {
-  const name = String(value || "running");
-  const label = name === "waiting" ? "waiting on me" : name;
-  const tone = name === "running" ? "green" : name === "waiting" ? "amber" : "gray";
+function stateCell(session) {
+  const name = String(
+    session.display_state || session.state || "running"
+  );
+  const label = STATE_LABELS[name] || name;
+  const tone = STATE_TONES[name] || "gray";
   const cell = el("td", "cell-state");
   cell.append(el("span", "chip chip-state chip-" + tone, label));
   return cell;
@@ -247,28 +289,109 @@ function pickSession(sessionId) {
   refreshEvents(); // then a session-scoped window replaces it
 }
 
+function idCellContent(session) {
+  // the label is the primary name when set; the collision-proof short
+  // id is always visible beside or beneath it
+  const wrap = el("div", "idwrap");
+  const shown = String(session.display_id || short8(session.session_id));
+  const button = el(
+    "button",
+    "idlink session-name",
+    String(session.label || shown)
+  );
+  button.type = "button";
+  button.title = session.session_id;
+  button.setAttribute(
+    "aria-pressed",
+    String(isSelected("session", session.session_id))
+  );
+  button.addEventListener("click", () => {
+    if (isMobile()) return; // the card handler catches the tap above
+    toggleSession(session.session_id);
+  });
+  wrap.append(button);
+  if (session.label) wrap.append(el("div", "idsub", shown));
+  const rename = el("button", "linkish rename", "rename");
+  rename.type = "button";
+  rename.title = "set a label for this session";
+  rename.addEventListener("click", (event) => {
+    // stop the bubble so the phone card tap never selects the session
+    event.stopPropagation();
+    startRename(session, wrap);
+  });
+  wrap.append(rename);
+  return wrap;
+}
+
+function startRename(session, wrap) {
+  // one inline editor in place of the name: enter saves, escape or
+  // blur cancels; an empty value clears the label
+  const input = document.createElement("input");
+  input.type = "text";
+  input.className = "rename-input";
+  input.value = String(session.label || "");
+  input.maxLength = 60;
+  input.placeholder = "label (empty clears)";
+  // taps inside the editor must not bubble into the phone card
+  // handler, which would repaint the table and close this editor
+  input.addEventListener("click", (event) => event.stopPropagation());
+  const hint = el("div", "idsub", "enter saves, esc cancels");
+  hint.addEventListener("click", (event) => event.stopPropagation());
+  wrap.replaceChildren(input, hint);
+  input.focus();
+  input.select();
+  let settled = false;
+  const finish = async (save) => {
+    if (settled) return;
+    if (!save) {
+      settled = true;
+      paintSessions();
+      return;
+    }
+    try {
+      await api(
+        "/api/sessions/" +
+          encodeURIComponent(session.session_id) +
+          "/label",
+        {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ label: input.value.trim() }),
+        }
+      );
+      settled = true;
+      await refreshSessions();
+    } catch (err) {
+      hint.textContent = "save failed: " + err.message;
+      input.focus();
+    }
+  };
+  input.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      finish(true);
+    } else if (event.key === "Escape") {
+      event.preventDefault();
+      finish(false);
+    }
+  });
+  input.addEventListener("blur", () => finish(false));
+}
+
 function sessionRow(session) {
   const row = document.createElement("tr");
   if (isSelected("session", session.session_id)) row.classList.add("selected");
 
   // the whole card is the tap target on phones; on desktop the row
-  // stays inert and only the id link selects
+  // stays inert and only the name link selects
   row.addEventListener("click", () => {
     if (isMobile()) pickSession(session.session_id);
   });
 
-  row.append(stateCell(session.state));
+  row.append(stateCell(session));
 
   const idCell = el("td", "cell-id");
-  const button = el("button", "idlink", short8(session.session_id));
-  button.type = "button";
-  button.title = session.session_id;
-  button.setAttribute("aria-pressed", String(isSelected("session", session.session_id)));
-  button.addEventListener("click", () => {
-    if (isMobile()) return; // the card handler catches the tap above
-    toggleSession(session.session_id);
-  });
-  idCell.append(button);
+  idCell.append(idCellContent(session));
   row.append(idCell);
 
   row.append(el("td", "cell-badge", String(session.adapter || "")));
@@ -297,6 +420,15 @@ function sessionRow(session) {
 // non-empty value; the classes are re-derived on every repaint and
 // the columns come back on their own once enriched data arrives.
 function paintSessions() {
+  displayIds.clear();
+  labels.clear();
+  for (const session of state.sessions) {
+    displayIds.set(
+      session.session_id,
+      String(session.display_id || short8(session.session_id))
+    );
+    if (session.label) labels.set(session.session_id, String(session.label));
+  }
   const hasAdapter = state.sessions.some(
     (session) => String(session.adapter || "").trim() !== ""
   );
@@ -326,7 +458,7 @@ function streamRow(event) {
   const head = el("span", "srow");
   head.append(el("span", "t", clock(parseTs(event.ts))));
   head.append(el("span", "ev", String(event.event || "")));
-  head.append(el("span", "sid", short8(event.session_id)));
+  head.append(el("span", "sid", sid(event.session_id)));
   row.append(head);
 
   const title = String(event.title || "");
@@ -361,7 +493,7 @@ function paintStream() {
 
   const filtered = state.selected !== null && state.selected.kind === "session";
   $("stream-title").textContent = filtered
-    ? "live stream: session " + short8(state.selected.id)
+    ? "live stream: " + targetName(state.selected.id)
     : "live stream";
 
   const empty = $("stream-empty");
@@ -376,7 +508,7 @@ function openAskRow(thread) {
   if (isSelected("thread", thread.nonce)) item.classList.add("selected");
 
   const line = el("div", "ask-line");
-  line.append(el("span", "sid", short8(thread.session_id)));
+  line.append(el("span", "sid", sid(thread.session_id)));
   line.append(el("span", "tx", String(thread.body || thread.title || "")));
 
   const createdMs = parseTs(thread.created_ts);
@@ -425,7 +557,7 @@ function settledAskRow(thread) {
   const outcome = expired ? "expired" : String(thread.answer || "unknown");
   const tone = expired ? "gray" : outcome === "allow" ? "green" : "red";
   item.append(el("span", "out out-" + tone, outcome));
-  item.append(el("span", "sid", short8(thread.session_id)));
+  item.append(el("span", "sid", sid(thread.session_id)));
   item.append(el("span", "tx", String(thread.body || thread.title || "")));
   return item;
 }
@@ -460,7 +592,7 @@ function paintTarget() {
   if (active && state.selected.kind === "thread") {
     text = "reply via thread " + short8(state.selected.id);
   } else if (active && state.selected.kind === "session") {
-    text = "reply to session " + short8(state.selected.id);
+    text = "reply to session " + targetName(state.selected.id);
   }
   line.textContent = text;
   line.classList.toggle("active", active);
@@ -476,7 +608,7 @@ function paintReplies() {
       item.append(el("span", "tx", String(reply.body || "")));
       const target = reply.thread_nonce
         ? "thread " + short8(reply.thread_nonce)
-        : "session " + short8(reply.session_id);
+        : "session " + sid(reply.session_id);
       item.append(el("span", "tgt", target));
       return item;
     })

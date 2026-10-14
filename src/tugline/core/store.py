@@ -5,9 +5,10 @@ questions like "what is this session waiting on". The store folds
 that log into tables a console can query in one place:
 
 - sessions: one row per session id seen in the spool, with the
-  earliest and latest event timestamps, the newest event name, and a
+  earliest and latest event timestamps, the newest event name, a
   derived state (waiting after a permissionrequest, done after a
-  stop, running otherwise).
+  stop, running otherwise), and an operator-settable display label
+  (NULL when unset; ingest never touches it).
 - events: every spool record, one row per record id. spool_id is
   UNIQUE, which with a SELECT check is what makes ingest idempotent.
   Rows carry the adapter/project/cwd session fields when the record
@@ -95,6 +96,12 @@ MIGRATIONS = [
         """
         ALTER TABLE events ADD COLUMN project TEXT NOT NULL DEFAULT '';
         ALTER TABLE events ADD COLUMN cwd TEXT NOT NULL DEFAULT '';
+        """,
+    ),
+    (
+        3,
+        """
+        ALTER TABLE sessions ADD COLUMN label TEXT;
         """,
     ),
 ]
@@ -459,6 +466,39 @@ class Store:
         return counts
 
     # -- writes from the console --
+
+    def set_session_label(self, session_id, label) -> dict:
+        """Set or clear one session's operator label.
+
+        The label is stored exactly as given: validation and trimming
+        belong to the caller (the console API). An empty value clears
+        the label (NULL). Raises KeyError for a session id the store
+        has never seen. Returns the updated row.
+        """
+        session_id = str(session_id)
+        value = str(label) if label else None
+        with self._lock:
+            self.conn.execute("BEGIN IMMEDIATE")
+            try:
+                row = self.conn.execute(
+                    "SELECT 1 FROM sessions WHERE session_id = ?",
+                    (session_id,),
+                ).fetchone()
+                if row is None:
+                    raise KeyError("unknown session: %r" % session_id)
+                self.conn.execute(
+                    "UPDATE sessions SET label = ? WHERE session_id = ?",
+                    (value, session_id),
+                )
+                self.conn.execute("COMMIT")
+            except BaseException:
+                self.conn.execute("ROLLBACK")
+                raise
+        return dict(
+            self.conn.execute(
+                "SELECT * FROM sessions WHERE session_id = ?", (session_id,)
+            ).fetchone()
+        )
 
     def add_reply(self, body, thread_nonce=None, session_id=None,
                   source="console") -> dict:

@@ -264,6 +264,53 @@ tr.selected td { background: rgba(88, 166, 255, 0.09); }
 
 tr.selected .idlink { color: var(--accent); }
 
+/* session identity: the operator label is the primary name, the
+   collision-proof short id sits beneath it, and the rename link
+   opens an inline editor in the same cell */
+.idwrap {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.1rem;
+  min-width: 0;
+}
+
+.idwrap .idlink.session-name {
+  max-width: 16rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-family: var(--sans);
+  font-weight: 600;
+}
+
+.idsub {
+  font-family: var(--mono);
+  font-size: 0.78rem;
+  color: var(--muted);
+  max-width: 16rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.idwrap .rename {
+  font-size: 0.75rem;
+  color: var(--muted);
+}
+
+.idwrap .rename:hover { color: var(--accent); }
+
+.rename-input {
+  width: 14rem;
+  max-width: 100%;
+  background: var(--bg);
+  border: 1px solid var(--accent);
+  border-radius: 2px;
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 0.85rem;
+  padding: 0.25rem 0.4rem;
+}
+
 .cell-badge { font-family: var(--mono); min-width: 6ch; color: var(--muted); }
 
 .cell-project,
@@ -592,12 +639,19 @@ textarea:disabled { opacity: 0.45; }
   #sessions-table td { display: block; min-width: 0; padding: 0; border: none; white-space: normal; }
   #sessions-table tr.selected td { background: none; }
   #sessions-table td.cell-state { order: 0; }
-  #sessions-table td.cell-badge { order: 1; max-width: none; overflow: visible; }
-  #sessions-table td.cell-id { order: 2; }
+  #sessions-table td.cell-id { order: 1; }
+  #sessions-table td.cell-badge { order: 2; max-width: none; overflow: visible; }
   #sessions-table td.cell-project { order: 3; max-width: none; overflow: visible; }
   #sessions-table td.cell-time { order: 4; margin-left: auto; }
   #sessions-table td.cell-event { order: 5; flex-basis: 100%; max-width: none; overflow: visible; }
   .cell-event .evbody { display: block; margin-top: 0.1rem; color: var(--muted); font-family: var(--sans); }
+  /* the name block (label first, lengthened id beneath) wraps its full
+     text with no ellipsis, like every other card line */
+  .idwrap .idlink.session-name,
+  .idwrap .idsub { max-width: none; overflow: visible; }
+  /* the rename link rides inside the name block: small text, but the
+     tap target keeps the 44px floor and the link stays keyboard-reachable */
+  .idwrap .rename { min-height: 44px; display: flex; align-items: center; }
 
   /* stream: time, event, id and the delivery chip hold line one; the
      full title and body wrap below */
@@ -641,7 +695,7 @@ textarea:disabled { opacity: 0.45; }
   /* reply: the send button is a full-width 44px target; recent
      replies wrap. Form controls use 16px text because iOS zooms the
      viewport on focus otherwise; prose keeps the 15px base */
-  textarea, .tokenbar input { font-size: 16px; }
+  textarea, .tokenbar input, .rename-input { font-size: 16px; }
   #reply-send { flex: 1; min-height: 44px; font-size: 0.95rem; }
   .recent .tx { white-space: normal; overflow: visible; }
 }
