@@ -11,11 +11,27 @@ they happened.
 
 ## What the page shows
 
-- Sessions: one row per session id seen in the spool, most recently
-  seen first. The state chip reads running, waiting on me (the newest
-  event is a permissionrequest), or done (the newest event is a stop).
-  The adapter and project columns fill in when hook records carry
-  them. Click the session id to filter the live stream to that
+- Sessions: one row per session id seen in the spool, sorted with
+  active-now sessions first, then everything else by recency. Each
+  row carries a name you can set: click rename and type (Enter
+  saves, Escape cancels, an empty value clears it); the label, when
+  set, is the row's primary name and the short id drops to a small
+  secondary line underneath. Labels live in the store, so they
+  survive restarts and re-ingest. Short ids are computed per page
+  load to be unique: when two sessions would render the same tail,
+  the id lengthens until they no longer collide (the full id in the
+  worst case), so you never see two rows with the same short name.
+- Session state is derived from recency, not just the last event:
+  active now (green) when the session was seen within five minutes;
+  running (green) while it keeps producing events inside a thirty
+  minute window; idle (gray) once a running session has been silent
+  for more than thirty minutes (a session whose last event is hours
+  old never reads as running); waiting on me (amber) when the newest
+  event is a permissionrequest, however old, because its age measures
+  operator inaction; done (gray) after a stop. The store keeps the
+  raw facts; the console derives what you see per response.
+- The adapter and project columns fill in when hook records carry
+  them. Click the session name to filter the live stream to that
   session and to aim the reply box at it.
 - Live stream: the newest events with time, event name, session id,
   and title. Each notifiable row carries a delivery chip: pending
@@ -99,14 +115,15 @@ Security below).
 | Method and path | What it does |
 | --- | --- |
 | GET `/` | the console page |
-| GET `/api/state` | one render in one read: sessions, the last 50 events, threads, the last 20 replies, headline counts, health, spool depth, last ingest time |
-| GET `/api/sessions` | all sessions, most recently seen first |
+| GET `/api/state` | one render in one read: sessions (decorated with `display_state` and a collision-proof `display_id`, active-now first), the last 50 events, threads, the last 20 replies, headline counts, health, spool depth, last ingest time |
+| GET `/api/sessions` | all sessions with the same decoration and ordering as `/api/state` |
 | GET `/api/events?limit=50&session=<id>` | events newest first, optionally scoped to one session; a non-integer limit is a 400 |
 | GET `/api/threads?status=open` | approval threads, newest first, optionally one status |
 | GET `/api/replies?limit=50` | replies, newest first; a non-integer limit is a 400 |
 | GET `/api/events/stream` | server-sent events: one `snapshot` on connect, then a `delta` after each ingest pass (about every 2 seconds), a `: ping` keepalive when 15 seconds pass with nothing to send |
 | POST `/api/replies` | body must be a JSON object with a string `body` and exactly one target, `thread_nonce` or `session_id`, or 400; an unknown thread nonce is a 404; records the reply and appends the replies.jsonl line |
 | POST `/api/approvals/<nonce>?decision=allow` | `decision` must be `allow` or `deny` or 400; an unknown nonce is a 404; an already answered nonce returns 200 with `status: already answered` and never flips the recorded decision |
+| PUT `/api/sessions/<id>/label` | body must be a JSON object with a string `label`: plain text (no control characters), trimmed, at most 60 characters, or 400; an empty label clears it; an unknown session id is a 404. Sets the row's operator label, the primary name the page shows |
 
 Event queries are ordered by timestamp, not insertion: spool records
 can arrive out of order, and the store sorts them so the stream reads
