@@ -46,9 +46,9 @@
  * markdown renderer (see its rule comment above renderMarkdown); every
  * other surface stays plain text. The sessions panel carries an inline
  * filter bar: a search input (identity fields plus last-event text)
- * and state chips over the same display_state vocabulary, applied
- * client side to the rows in memory, with the state kept in memory so
- * repaints and SSE deltas keep honoring it.
+ * and a state segmented control over the same display_state
+ * vocabulary, applied client side to the rows in memory, with the
+ * state kept in memory so repaints and SSE deltas keep honoring it.
  *
  * Ask cards (W9-L22): kind=ask threads render as question cards under
  * the approval cards, the question text in full and each lettered
@@ -88,10 +88,10 @@ const STATE_TONES = {
   done: "gray",
 };
 
-// Sessions filter bar. Chips read the display_state vocabulary the
-// console already renders; Running covers running AND active (both are
-// live work). The filter lives in memory only and survives repaints,
-// so SSE delta refreshes keep honoring it.
+// Sessions filter bar. The five state segments read the
+// display_state vocabulary the console already renders; Running covers
+// running AND active (both are live work). The filter lives in memory
+// only and survives repaints, so SSE delta refreshes keep honoring it.
 const FILTER_CHIPS = [
   { key: "all", label: "All", states: null },
   { key: "running", label: "Running", states: ["running", "active"] },
@@ -960,7 +960,7 @@ function setFilterChip(key) {
       chip.key === key
     );
   }
-  // keep the chosen chip visible when the row scrolls horizontally
+  // keep the chosen segment visible when the group scrolls horizontally
   const el = $("filter-chip-" + key);
   if (el) el.scrollIntoView({ block: "nearest", inline: "center" });
   paintSessions();
