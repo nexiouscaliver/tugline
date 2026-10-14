@@ -475,6 +475,27 @@ def test_answered_by_tug_answer_while_blocking(tmp_path):
     runner._test_store.close()
 
 
+def test_console_tap_flip_then_reply_row_still_answers(tmp_path):
+    seed(tmp_path)
+    runner = make_runner(tmp_path)
+    store, clock = runner._test_store, runner._test_clock
+
+    def tap_like_the_console_endpoint(seconds):
+        # the console answer endpoint closes the thread first, then
+        # records the reply row; a poll that sees the row after the
+        # close must read it as the answer, not as a race error
+        store.answer_ask_thread("ask-1", "B")
+        store.add_reply("B", thread_nonce="ask-1", source="console")
+
+    clock.on_sleep = tap_like_the_console_endpoint
+    result = runner.run(
+        "sess_517ee9c0aaaa", "q?", OPTIONS, timeout_s=300, nonce="ask-1"
+    )
+    assert result["ok"] is True
+    assert result["key"] == "B"
+    runner._test_store.close()
+
+
 # -- never raises --
 
 

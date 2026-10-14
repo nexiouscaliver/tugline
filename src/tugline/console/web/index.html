@@ -61,6 +61,7 @@
   <section class="panel" id="asks-panel" aria-label="asks">
     <h2>asks</h2>
     <ul class="asks" id="asks-open"></ul>
+    <ul class="asks" id="asks-mcq"></ul>
     <p class="empty" id="asks-empty" hidden>no open asks</p>
     <h3 id="asks-settled-heading" hidden>answered and expired</h3>
     <ul class="asks settled" id="asks-settled"></ul>
@@ -79,7 +80,11 @@
   </section>
 
   <section class="panel" id="stream-panel" aria-label="live stream">
-    <h2 id="stream-title">live stream</h2>
+    <div class="stream-head">
+      <h2 id="stream-title">live stream</h2>
+      <button type="button" class="fchip stream-group-chip" id="stream-group"
+              aria-pressed="false">group by session</button>
+    </div>
     <div class="scroll">
       <ol class="stream" id="stream"></ol>
     </div>
