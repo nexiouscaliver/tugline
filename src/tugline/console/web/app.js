@@ -58,6 +58,14 @@ const STATE_TONES = {
   done: "gray",
 };
 
+// phones (< 720px) trade the stacked panels for a bottom tab bar: one
+// panel visible at a time, the whole viewport above it scrolls. The
+// active tab lives here in memory, so repaints (which only refill the
+// lists inside panels) never move the user to another panel.
+const MOBILE_QUERY = window.matchMedia("(max-width: 719px)");
+const TABS = ["sessions", "stream", "asks", "reply"];
+const MOBILE_STREAM_STEP = 30; // the mobile render cap starts at 30 rows
+
 const state = {
   sessions: [],
   events: [],
@@ -67,9 +75,12 @@ const state = {
   spoolDepth: 0,
   lastIngestMs: null,
   selected: null, // {kind: "session"|"thread", id: "..."} or null
+  activeTab: "sessions",
 };
 
 let stream = null; // the EventSource, or null before the first open
+
+let mobileStreamRows = MOBILE_STREAM_STEP; // grows by 30 per "show older"
 
 let apiToken = ""; // from ?token= in the page URL, or pasted into the bar
 
@@ -148,6 +159,27 @@ function el(tag, className, text) {
 
 function isSelected(kind, id) {
   return state.selected !== null && state.selected.kind === kind && state.selected.id === id;
+}
+
+// -- mobile tabs --
+
+function isMobile() {
+  return MOBILE_QUERY.matches;
+}
+
+// Exactly one panel carries "active"; the mobile stylesheet hides the
+// rest. Switching is instant (no animation) and starts each panel at
+// the top of the page. On desktop the class has no styling, so all
+// four panels keep their grid seats.
+function showTab(name) {
+  state.activeTab = name;
+  for (const tab of TABS) {
+    const on = tab === name;
+    $("tab-" + tab).classList.toggle("active", on);
+    $("tab-" + tab).setAttribute("aria-current", on ? "true" : "false");
+    $(tab + "-panel").classList.toggle("active", on);
+  }
+  if (isMobile()) window.scrollTo(0, 0);
 }
 
 async function api(path, options) {
@@ -239,13 +271,28 @@ function stateCell(session) {
   return cell;
 }
 
-function lastEventText(session) {
+// The newest spooled event matching the session's last_event name; its
+// title rides the desktop cell and its body fills the mobile card.
+function lastEventFor(session) {
   const name = String(session.last_event || "");
-  const latest = state.events.find(
-    (event) => event.session_id === session.session_id && event.event === name
+  if (!name) return null;
+  return (
+    state.events.find(
+      (event) => event.session_id === session.session_id && event.event === name
+    ) || null
   );
-  const title = latest && latest.title ? " " + latest.title : "";
-  return name + title;
+}
+
+// Mobile: tapping a card picks that session and jumps straight to the
+// reply tab. Pick who, then write. There is no toggle-off here; the
+// reply box explains itself when no target is set.
+function pickSession(sessionId) {
+  state.selected = { kind: "session", id: sessionId };
+  paintSessions();
+  paintStream(); // the loaded window is filtered client side right away
+  paintTarget();
+  showTab("reply");
+  refreshEvents(); // then a session-scoped window replaces it
 }
 
 function idCellContent(session) {
@@ -265,14 +312,21 @@ function idCellContent(session) {
     "aria-pressed",
     String(isSelected("session", session.session_id))
   );
-  button.addEventListener("click", () => toggleSession(session.session_id));
+  button.addEventListener("click", () => {
+    if (isMobile()) return; // the card handler catches the tap above
+    toggleSession(session.session_id);
+  });
   wrap.append(button);
   if (session.label) wrap.append(el("div", "idsub", shown));
   wrap.append(tagChips(session));
   const rename = el("button", "linkish rename", "rename");
   rename.type = "button";
   rename.title = "set a label for this session";
-  rename.addEventListener("click", () => startRename(session, wrap));
+  rename.addEventListener("click", (event) => {
+    // stop the bubble so the phone card tap never selects the session
+    event.stopPropagation();
+    startRename(session, wrap);
+  });
   wrap.append(rename);
   return wrap;
 }
@@ -375,7 +429,11 @@ function startRename(session, wrap) {
   input.value = String(session.label || "");
   input.maxLength = 60;
   input.placeholder = "label (empty clears)";
+  // taps inside the editor must not bubble into the phone card
+  // handler, which would repaint the table and close this editor
+  input.addEventListener("click", (event) => event.stopPropagation());
   const hint = el("div", "idsub", "enter saves, esc cancels");
+  hint.addEventListener("click", (event) => event.stopPropagation());
   wrap.replaceChildren(input, hint);
   input.focus();
   input.select();
@@ -421,6 +479,12 @@ function sessionRow(session) {
   const row = document.createElement("tr");
   if (isSelected("session", session.session_id)) row.classList.add("selected");
 
+  // the whole card is the tap target on phones; on desktop the row
+  // stays inert and only the name link selects
+  row.addEventListener("click", () => {
+    if (isMobile()) pickSession(session.session_id);
+  });
+
   row.append(stateCell(session));
 
   const idCell = el("td", "cell-id");
@@ -429,7 +493,16 @@ function sessionRow(session) {
 
   row.append(el("td", "cell-badge", String(session.adapter || "")));
   row.append(el("td", "cell-project", String(session.project || "")));
-  row.append(el("td", "cell-event", lastEventText(session)));
+
+  const latest = lastEventFor(session);
+  const name = String(session.last_event || "");
+  const eventCell = el("td", "cell-event");
+  eventCell.append(
+    el("span", "evname", name + (latest && latest.title ? " " + latest.title : ""))
+  );
+  const bodyText = latest ? String(latest.body || "") : "";
+  if (bodyText) eventCell.append(el("span", "evbody", bodyText));
+  row.append(eventCell);
 
   const seenMs = parseTs(session.last_seen);
   const seen = el("td", "cell-time", relTime(seenMs));
@@ -475,10 +548,23 @@ function visibleEvents() {
 
 function streamRow(event) {
   const row = document.createElement("li");
-  row.append(el("span", "t", clock(parseTs(event.ts))));
-  row.append(el("span", "ev", String(event.event || "")));
-  row.append(el("span", "sid", sid(event.session_id)));
-  row.append(el("span", "tx", String(event.title || event.body || "")));
+
+  // the head group is layout-transparent on desktop (display:
+  // contents) and becomes the phone's first line; the delivery chip
+  // gets its own grid seat on phones so it never leaves the screen
+  const head = el("span", "srow");
+  head.append(el("span", "t", clock(parseTs(event.ts))));
+  head.append(el("span", "ev", String(event.event || "")));
+  head.append(el("span", "sid", sid(event.session_id)));
+  row.append(head);
+
+  const title = String(event.title || "");
+  const body = String(event.body || "");
+  row.append(el("span", "tx", title || body));
+  // when both exist the desktop cell keeps title-or-body as before,
+  // and phones wrap the full body under the title
+  if (title && body) row.append(el("span", "tx-extra", body));
+
   if (notifiable(event.event)) {
     const delivered = Number(event.delivered) === 1;
     row.append(
@@ -496,7 +582,11 @@ function streamRow(event) {
 
 function paintStream() {
   const events = visibleEvents();
-  $("stream").replaceChildren(...events.map(streamRow));
+  // phones render the newest rows first and extend on demand; the cap
+  // lives only here, so desktop always paints the full window
+  const capped = isMobile() ? events.slice(0, mobileStreamRows) : events;
+  $("stream").replaceChildren(...capped.map(streamRow));
+  $("stream-more").hidden = !(isMobile() && events.length > capped.length);
 
   const filtered = state.selected !== null && state.selected.kind === "session";
   $("stream-title").textContent = filtered
@@ -540,7 +630,18 @@ function openAskRow(thread) {
   deny.addEventListener("click", () =>
     decide(thread.nonce, "deny", [approve, deny], error)
   );
-  reply.addEventListener("click", () => toggleThread(thread.nonce));
+  reply.addEventListener("click", () => {
+    if (isMobile()) {
+      // same flow as picking a session card: set the thread target
+      // and land on the reply box, ready to write
+      state.selected = { kind: "thread", id: thread.nonce };
+      paintAsks();
+      paintTarget();
+      showTab("reply");
+      return;
+    }
+    toggleThread(thread.nonce);
+  });
 
   line.append(approve, deny, reply);
   item.append(line, error);
@@ -759,6 +860,10 @@ function paintLiveChip() {
   const open = stream !== null && stream.readyState === 1;
   chip.textContent = open ? "live" : "reconnecting";
   chip.className = "chip " + (open ? "chip-green" : "chip-amber");
+  // phones: a dropped stream also draws the thin amber line that sits
+  // just above the tab bar, so the state survives the header scrolling
+  // off screen; the tab bar itself hides this on desktop
+  $("drop-line").hidden = open;
 }
 
 function onDelta(delta) {
@@ -833,6 +938,21 @@ async function init() {
   $("token-save").addEventListener("click", applyToken);
   $("token-input").addEventListener("keydown", (event) => {
     if (event.key === "Enter") applyToken();
+  });
+
+  for (const tab of TABS) {
+    $("tab-" + tab).addEventListener("click", () => showTab(tab));
+  }
+  $("stream-more").addEventListener("click", () => {
+    mobileStreamRows += MOBILE_STREAM_STEP;
+    paintStream();
+  });
+  showTab(state.activeTab); // one panel active from the first frame
+  MOBILE_QUERY.addEventListener("change", () => {
+    // crossing the 720px line: restore the one-visible-panel invariant
+    // and reapply (or lift) the mobile stream cap
+    if (isMobile()) showTab(state.activeTab);
+    paintStream();
   });
 
   // capture ?token= from the page URL: the shell opened without
