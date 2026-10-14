@@ -49,6 +49,24 @@
  * and state chips over the same display_state vocabulary, applied
  * client side to the rows in memory, with the state kept in memory so
  * repaints and SSE deltas keep honoring it.
+ *
+ * Ask cards (W9-L22): kind=ask threads render as question cards under
+ * the approval cards, the question text in full and each lettered
+ * option a full-width tappable row (48px floor, letter in monospace).
+ * A tap POSTs to /api/asks/<nonce>, which records the answer exactly
+ * like a bound reply and closes the thread; the rows disable while
+ * the request is in flight, an inline error re-enables them, and the
+ * settled list shows the chosen letter in green.
+ *
+ * Identity everywhere (W9-L22): every stream row and detail event row
+ * renders the display name the enriched row itself carries
+ * (display_id: the label when set, else the collision-proof suffix),
+ * with adapter and project badges where the record has them and space
+ * allows; phone rows show the name only. The stream panel also offers
+ * a group toggle: flat newest-first, or sections grouped by session
+ * (newest activity first, events newest-first inside) whose headers
+ * carry name, state chip, and relative time, and whose tap aims the
+ * sessions filter bar at that one session.
  */
 
 const EVENTS_LIMIT = 50;
@@ -86,6 +104,12 @@ const sessionFilter = { text: "", chip: "all" };
 function filterActive() {
   return sessionFilter.text.trim() !== "" || sessionFilter.chip !== "all";
 }
+
+// Grouped stream (W9-L22): one chip in the stream panel header flips
+// between the flat newest-first list and sections grouped by session.
+// The choice lives in memory only, so repaints keep honoring it and a
+// fresh page starts flat.
+const streamGrouped = { on: false };
 
 // phones (< 720px) trade the stacked panels for a bottom tab bar: one
 // panel visible at a time, the whole viewport above it scrolls. The
@@ -144,6 +168,15 @@ const labels = new Map();
 
 function sid(sessionId) {
   return displayIds.get(sessionId) || short8(sessionId);
+}
+
+// The name an event row renders: the display field the enriched row
+// carries (label when set, else the collision-proof suffix; the one
+// server-side display rule). The sid() map over the sessions view is
+// only the fallback for a row the server could not enrich; the
+// leading id characters are never derived here.
+function rowName(event) {
+  return String((event && event.display_id) || sid(event && event.session_id));
 }
 
 function targetName(sessionId) {
@@ -955,7 +988,21 @@ function streamRow(event) {
   const head = el("span", "srow");
   head.append(el("span", "t", clock(parseTs(event.ts))));
   head.append(el("span", "ev", String(event.event || "")));
-  head.append(el("span", "sid", sid(event.session_id)));
+
+  // who: the session display name from the enriched row, with
+  // adapter and project badges where the record carries them (phones
+  // hide the badges to keep rows readable)
+  const who = el("span", "who");
+  const name = el("span", "sname", rowName(event));
+  name.title = String(event.session_id || "");
+  who.append(name);
+  if (event.adapter) {
+    who.append(el("span", "sbadge", String(event.adapter)));
+  }
+  if (event.project) {
+    who.append(el("span", "sbadge", String(event.project)));
+  }
+  head.append(who);
   row.append(head);
 
   const title = String(event.title || "");
@@ -980,13 +1027,98 @@ function streamRow(event) {
   return row;
 }
 
+// -- grouped stream (W9-L22) --
+
+function sessionRowFor(sessionId) {
+  return (
+    state.sessions.find(
+      (session) => session.session_id === sessionId
+    ) || null
+  );
+}
+
+// Sections newest-activity-first over a newest-first event list: the
+// first appearance of a session decides its section's place, and each
+// bucket keeps the list order (newest first) inside.
+function groupedStreamSections(events) {
+  const order = [];
+  const buckets = new Map();
+  for (const event of events) {
+    const key = String(event.session_id || "");
+    if (!buckets.has(key)) {
+      buckets.set(key, []);
+      order.push(key);
+    }
+    buckets.get(key).push(event);
+  }
+  return order.map((key) => streamGroupSection(key, buckets.get(key)));
+}
+
+function streamGroupSection(sessionId, events) {
+  const section = document.createElement("li");
+  section.className = "sgroup";
+
+  const session = sessionRowFor(sessionId);
+  const stateName = String(
+    (session && (session.display_state || session.state)) || "running"
+  );
+  const head = el("button", "sgroup-head");
+  head.type = "button";
+  const name = el("span", "sname", rowName(events[0] || {}));
+  name.title = sessionId;
+  head.append(name);
+  head.append(
+    el(
+      "span",
+      "chip chip-state chip-" + (STATE_TONES[stateName] || "gray"),
+      STATE_LABELS[stateName] || stateName
+    )
+  );
+  const newestMs = parseTs(events[0] && events[0].ts);
+  const age = el("span", "age", relTime(newestMs));
+  age.dataset.rel = newestMs === null ? "" : String(newestMs);
+  head.append(age);
+  head.addEventListener("click", () => filterSessionsTo(sessionId));
+
+  const inner = el("ol", "stream sgroup-events");
+  inner.append(...events.map(streamRow));
+  section.append(head, inner);
+  return section;
+}
+
+// Tapping a section header aims the sessions filter bar at that one
+// session: the full session id is the one search term guaranteed to
+// match exactly one row, and the state chip resets so the row always
+// shows.
+function filterSessionsTo(sessionId) {
+  setFilterChip("all");
+  sessionFilter.text = String(sessionId || "");
+  $("filter-search").value = sessionFilter.text;
+  paintSessions();
+  if (isMobile()) showTab("sessions");
+}
+
+function paintStreamGroupChip() {
+  const chip = $("stream-group");
+  chip.textContent = streamGrouped.on
+    ? "grouped by session"
+    : "group by session";
+  chip.classList.toggle("active", streamGrouped.on);
+  chip.setAttribute("aria-pressed", streamGrouped.on ? "true" : "false");
+}
+
 function paintStream() {
   const events = visibleEvents();
   // phones render the newest rows first and extend on demand; the cap
   // lives only here, so desktop always paints the full window
   const capped = isMobile() ? events.slice(0, mobileStreamRows) : events;
-  $("stream").replaceChildren(...capped.map(streamRow));
+  if (streamGrouped.on) {
+    $("stream").replaceChildren(...groupedStreamSections(capped));
+  } else {
+    $("stream").replaceChildren(...capped.map(streamRow));
+  }
   $("stream-more").hidden = !(isMobile() && events.length > capped.length);
+  paintStreamGroupChip();
 
   const filtered = state.selected !== null && state.selected.kind === "session";
   $("stream-title").textContent = filtered
@@ -1050,6 +1182,18 @@ function openAskRow(thread) {
 
 function settledAskRow(thread) {
   const item = document.createElement("li");
+  if (thread.kind === "ask") {
+    // an answered ask shows its chosen letter in green; an expired
+    // one reads expired like every other settled row
+    const expired = thread.status === "expired";
+    const outcome = expired ? "expired" : String(thread.answer || "?");
+    item.append(
+      el("span", "out out-" + (expired ? "gray" : "green"), outcome)
+    );
+    item.append(el("span", "sid", sid(thread.session_id)));
+    item.append(el("span", "tx", String(thread.title || thread.body || "")));
+    return item;
+  }
   const expired = thread.status === "expired";
   const outcome = expired ? "expired" : String(thread.answer || "unknown");
   const tone = expired ? "gray" : outcome === "allow" ? "green" : "red";
@@ -1059,12 +1203,82 @@ function settledAskRow(thread) {
   return item;
 }
 
+// One open kind=ask thread as a question card: the question text in
+// full, each lettered option a full-width tappable row (letter in
+// monospace, 48px floor). A tap POSTs the key to /api/asks/<nonce>;
+// the rows disable while the request is in flight, an inline error
+// re-enables them, and the repaint after success moves the card into
+// the settled list with the chosen letter in green.
+function openAskCard(thread) {
+  const item = document.createElement("li");
+  item.className = "askcard";
+  if (isSelected("thread", thread.nonce)) item.classList.add("selected");
+
+  const top = el("div", "ask-top");
+  const name = el("span", "sid", sid(thread.session_id));
+  name.title = String(thread.session_id || "");
+  top.append(name);
+  const createdMs = parseTs(thread.created_ts);
+  const age = el("span", "age", relTime(createdMs));
+  age.dataset.rel = createdMs === null ? "" : String(createdMs);
+  top.append(age);
+  item.append(top);
+
+  item.append(el("p", "ask-q", String(thread.title || thread.body || "")));
+
+  const error = el("p", "error");
+  error.hidden = true;
+  const opts = el("div", "ask-opts");
+  const buttons = [];
+  for (const option of thread.options || []) {
+    const key = String(option.key || "");
+    if (!key) continue;
+    const row = el("button", "ask-opt");
+    row.type = "button";
+    row.append(
+      el("span", "opt-key", key),
+      el("span", "opt-text", String(option.text || ""))
+    );
+    row.addEventListener("click", () =>
+      answerAsk(thread, key, buttons, error)
+    );
+    buttons.push(row);
+    opts.append(row);
+  }
+  item.append(opts);
+
+  // a free-form reply to the asking session still goes through the
+  // reply box, exactly like an approval card's reply link
+  const reply = el("button", "linkish ask-replylink", "reply");
+  reply.type = "button";
+  if (isSelected("thread", thread.nonce)) reply.classList.add("on");
+  reply.addEventListener("click", () => {
+    if (isMobile()) {
+      state.selected = { kind: "thread", id: thread.nonce };
+      paintAsks();
+      paintTarget();
+      showTab("reply");
+      return;
+    }
+    toggleThread(thread.nonce);
+  });
+  item.append(reply, error);
+  return item;
+}
+
 function paintAsks() {
-  const open = state.threads.filter((thread) => thread.status === "open");
+  const openApprovals = state.threads.filter(
+    (thread) => thread.status === "open" && thread.kind !== "ask"
+  );
+  const openAsks = state.threads.filter(
+    (thread) => thread.status === "open" && thread.kind === "ask"
+  );
   const settled = state.threads.filter((thread) => thread.status !== "open");
 
-  $("asks-open").replaceChildren(...open.map(openAskRow));
-  $("asks-empty").hidden = open.length > 0;
+  // approvals keep their cards above the ask cards
+  $("asks-open").replaceChildren(...openApprovals.map(openAskRow));
+  $("asks-mcq").replaceChildren(...openAsks.map(openAskCard));
+  $("asks-empty").hidden = openApprovals.length + openAsks.length > 0;
 
   $("asks-settled").replaceChildren(...settled.map(settledAskRow));
   $("asks-settled-heading").hidden = settled.length === 0;
@@ -1073,7 +1287,9 @@ function paintAsks() {
   if (
     state.selected !== null &&
     state.selected.kind === "thread" &&
-    !open.some((thread) => thread.nonce === state.selected.id)
+    ![...openApprovals, ...openAsks].some(
+      (thread) => thread.nonce === state.selected.id
+    )
   ) {
     state.selected = null;
     paintTarget();
@@ -1149,6 +1365,40 @@ async function decide(nonce, decision, buttons, errorNode) {
     await refreshThreads(); // the repaint moves the row into the settled list
   } catch (err) {
     errorNode.textContent = "decision failed: " + err.message;
+    errorNode.hidden = false;
+    for (const button of buttons) {
+      button.disabled = false;
+    }
+  }
+}
+
+// One option tap on an ask card. The endpoint records the answer
+// exactly like a bound reply (the response carries the reply row, so
+// the recent list updates without waiting for a snapshot) and closes
+// the thread, and refreshThreads moves the card into the settled
+// list showing the chosen letter in green.
+async function answerAsk(thread, key, buttons, errorNode) {
+  for (const button of buttons) {
+    button.disabled = true;
+  }
+  errorNode.hidden = true;
+  errorNode.textContent = "";
+  try {
+    const data = await api(
+      "/api/asks/" + encodeURIComponent(thread.nonce),
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ key: key }),
+      }
+    );
+    if (data.reply) {
+      state.replies.unshift(data.reply);
+      paintReplies();
+    }
+    await refreshThreads(); // the repaint moves the card into the settled list
+  } catch (err) {
+    errorNode.textContent = "answer failed: " + err.message;
     errorNode.hidden = false;
     for (const button of buttons) {
       button.disabled = false;
@@ -1357,6 +1607,10 @@ async function init() {
     );
   }
   $("detail-back").addEventListener("click", goBackFromDetail);
+  $("stream-group").addEventListener("click", () => {
+    streamGrouped.on = !streamGrouped.on;
+    paintStream();
+  });
   $("stream-more").addEventListener("click", () => {
     mobileStreamRows += MOBILE_STREAM_STEP;
     paintStream();

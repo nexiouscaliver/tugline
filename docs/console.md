@@ -59,20 +59,33 @@ they happened.
 - The adapter and project columns fill in when hook records carry
   them. Click the session name to filter the live stream to that
   session and to aim the reply box at it.
-- Live stream: the newest events with time, event name, session id,
-  and title. Each notifiable row carries a delivery chip: pending
-  until the daemon handles the record, delivered after (delivered
-  means handled, published or not). userpromptsubmit and
-  sessionstart records never notify, so they show no chip rather than
-  a false pending.
+- Live stream: the newest events with time, event name, session
+  name, and title. Every row renders the session's display name (the
+  label when set, else the collision-proof short id) straight from
+  the enriched event row, and desktop rows add small adapter and
+  project badges under the name when the record carries them (phone
+  rows show the name only, to stay readable). Each notifiable row
+  carries a delivery chip: pending until the daemon handles the
+  record, delivered after (delivered means handled, published or
+  not). userpromptsubmit and sessionstart records never notify, so
+  they show no chip rather than a false pending. A group by session
+  chip in the panel header toggles between the flat newest-first
+  list and sections grouped by session, newest activity first, each
+  with a header (display name, state chip, relative time) whose tap
+  aims the sessions filter bar at that one session; the choice lives
+  in memory, so a fresh page starts flat.
 - Asks: every open approval ask with Approve and Deny buttons and a
   reply link, plus an answered and expired list underneath. The
   buttons write the same decision files the approve receiver reads,
   so a press on the page and a press on a phone notification have the
-  same effect. Multiple choice asks (`tug ask`) appear in the same
-  thread list with `kind: "ask"`: their rows carry the lettered
-  `options` as parsed JSON plus the `status`/`answer` state, so the
-  page can render the question with tappable choices (see Asking
+  same effect. Multiple choice asks (`tug ask`) render as question
+  cards under the approval cards: the question text in full and each
+  lettered option a full-width tappable row (the letter in
+  monospace, a 48px floor). A tap POSTs to `/api/asks/<nonce>`,
+  which records the answer exactly like a bound reply and closes the
+  thread; the option rows disable while the request is in flight,
+  a failure shows an inline error and re-enables them, and the
+  settled list shows the chosen letter in green (see Asking
   questions below).
 - Reply: a text box with an explicit target line: reply to session
   <name> (label first, short id second, so you always see exactly
@@ -274,9 +287,16 @@ tug ask --session <id> \
 The console contract (for the page): threads with `kind: "ask"`
 render with their `options` array (`[{key, text}, ...]`) and their
 answer state (`status` open/answered/expired, `answer` the chosen
-key). A tap or a reply sent through the normal reply endpoints with
-the thread nonce (or the session as the target, body just the
-letter) answers the ask. Session rows and event rows carry
+key). A tap POSTs `{"key": "<letter>"}` to `/api/asks/<nonce>`,
+which records the answer exactly like a bound reply (a console
+reply row plus the replies.jsonl line, body the bare option key)
+and closes the thread itself, so the card flips without waiting
+for the asking process to poll; an already-answered ask answers
+200 again with the recorded key and never writes a second reply
+row, an expired ask answers 409, an unknown nonce 404. A reply
+sent through the normal reply endpoints with the thread nonce (or
+the session as the target, body just the letter) answers the ask
+too. Session rows and event rows carry
 `label`, `tags`, and `display_id`; the display id is the one rule
 (label else collision-proof suffix) exported as
 `tugline.core.store.session_display_id`, and templates should render

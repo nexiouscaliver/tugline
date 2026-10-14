@@ -679,6 +679,19 @@ tr.selected .idlink { color: var(--accent); }
 
 /* -- live stream -- */
 
+/* panel header: the title plus the group toggle chip (44px) */
+.stream-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin-bottom: 0.55rem;
+}
+
+.stream-head h2 { margin: 0; }
+
+.stream-group-chip { padding: 0.35rem 0.7rem; }
+
 .stream {
   list-style: none;
   margin: 0;
@@ -689,7 +702,7 @@ tr.selected .idlink { color: var(--accent); }
 
 .stream li {
   display: grid;
-  grid-template-columns: 8ch 14ch 9ch minmax(0, 1fr) 10ch;
+  grid-template-columns: 8ch 14ch minmax(10ch, 20ch) minmax(0, 1fr) 10ch;
   gap: 0.7rem;
   align-items: baseline;
   padding: 0.2rem 0;
@@ -702,6 +715,39 @@ tr.selected .idlink { color: var(--accent); }
 .stream .sid {
   font-family: var(--mono);
   color: var(--muted);
+}
+
+/* who: the display name an enriched row carries, stacked over tiny
+   adapter/project badges (desktop; phones hide the badges) */
+.stream .who {
+  display: flex;
+  flex-direction: column;
+  gap: 0.08rem;
+  min-width: 0;
+}
+
+.stream .who .sname {
+  font-family: var(--mono);
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.sname { min-width: 0; }
+
+.sbadge {
+  font-family: var(--mono);
+  font-size: 0.68rem;
+  line-height: 1;
+  color: var(--muted);
+  border: 1px solid rgba(139, 148, 158, 0.35);
+  border-radius: 2px;
+  padding: 0.1rem 0.25rem;
+  align-self: flex-start;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .stream .ev {
@@ -727,6 +773,52 @@ tr.selected .idlink { color: var(--accent); }
 /* the full body wraps under the title on phones only */
 .stream .tx-extra { display: none; }
 
+/* grouped stream: one section per session, newest activity first.
+   The section li is a plain block (not a grid row); its header is a
+   44px button that aims the sessions filter at that session, and the
+   events inside keep the ordinary stream row anatomy. */
+.stream li.sgroup {
+  display: block;
+  padding: 0.15rem 0 0.35rem;
+}
+
+.sgroup-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.35rem 0.5rem;
+  width: 100%;
+  min-height: 44px;
+  padding: 0.15rem 0.25rem;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 2px;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.sgroup-head:hover { border-color: var(--border); }
+
+.sgroup-head .sname {
+  font-family: var(--mono);
+  font-weight: 600;
+  color: var(--text);
+  max-width: 20rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sgroup-head .age {
+  margin-left: auto;
+  font-family: var(--mono);
+  color: var(--muted);
+}
+
+.stream .sgroup-events { min-width: 0; }
+
 /* -- asks -- */
 
 .asks {
@@ -737,6 +829,9 @@ tr.selected .idlink { color: var(--accent); }
   flex-direction: column;
   gap: 0.5rem;
 }
+
+/* approvals above the ask cards, with a breath between the lists */
+#asks-open:not(:empty) + #asks-mcq { margin-top: 0.5rem; }
 
 .asks > li {
   border: 1px solid var(--border);
@@ -802,6 +897,84 @@ tr.selected .idlink { color: var(--accent); }
 
 .linkish:hover,
 .linkish.on { text-decoration: underline; }
+
+/* ask cards: the question text in full, each lettered option one
+   full-width tappable row (48px floor, letter in monospace) */
+.askcard {
+  border: 1px solid var(--border);
+  border-radius: 2px;
+  padding: 0.55rem 0.65rem;
+}
+
+.askcard.selected { border-color: var(--accent); }
+
+.ask-top {
+  display: flex;
+  align-items: baseline;
+  gap: 0.6rem;
+}
+
+.ask-top .sid { font-family: var(--mono); font-size: 0.9rem; }
+
+.ask-top .age {
+  margin-left: auto;
+  font-family: var(--mono);
+  color: var(--muted);
+  min-width: 6ch;
+  text-align: right;
+}
+
+.ask-q {
+  margin: 0.4rem 0 0.5rem;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.ask-opts {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.ask-opt {
+  display: flex;
+  align-items: baseline;
+  gap: 0.6rem;
+  width: 100%;
+  min-height: 48px;
+  padding: 0.35rem 0.6rem;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 2px;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.ask-opt:hover:not(:disabled) { border-color: var(--gray); }
+
+.ask-opt:disabled { opacity: 0.5; cursor: default; }
+
+.ask-opt .opt-key {
+  font-family: var(--mono);
+  font-weight: 700;
+  min-width: 1.2ch;
+}
+
+.ask-opt .opt-text {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+/* the reply link on an ask card keeps the 44px target everywhere */
+.askcard .ask-replylink {
+  margin-top: 0.45rem;
+  min-height: 44px;
+  display: inline-flex;
+  align-items: center;
+}
 
 .settled { gap: 0; }
 
@@ -1009,8 +1182,10 @@ textarea:disabled { opacity: 0.45; }
   #sessions-table td.cell-project { display: none; }
 
   /* stream: time, event, id and the delivery chip hold line one; the
-     full title and body wrap below */
+     full title and body wrap below. Phone rows show the name only:
+     the adapter and project badges stay a desktop affordance. */
   .stream { min-width: 0; }
+  .stream .sbadge { display: none; }
   .stream li {
     display: grid;
     grid-template-columns: minmax(0, 1fr) auto;
@@ -1046,6 +1221,16 @@ textarea:disabled { opacity: 0.45; }
   .ask-line .btn-approve, .ask-line .btn-deny { flex: 1 1 100%; min-height: 48px; font-size: 1rem; }
   .ask-line .linkish { order: 5; flex-basis: 100%; min-height: 44px; display: flex; align-items: center; font-size: 0.95rem; }
   .settled .tx { white-space: normal; overflow: visible; }
+
+  /* ask cards: option rows are full-width 48px targets with wrapped
+     option text; the reply link spans the card width */
+  .askcard .ask-top .age { min-width: 0; }
+  .askcard .ask-opt { font-size: 1rem; }
+  .askcard .ask-replylink { display: flex; width: 100%; font-size: 0.95rem; }
+
+  /* grouped stream sections: the header wraps name, chip, and age,
+     and keeps its 44px target */
+  .sgroup-head .sname { max-width: none; overflow: visible; white-space: normal; }
 
   /* reply: the send button is a full-width 44px target; recent
      replies wrap. Form controls use 16px text because iOS zooms the

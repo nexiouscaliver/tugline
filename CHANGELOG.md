@@ -9,6 +9,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Ask cards in the console, mobile and desktop: open `tug ask`
+  threads render as question cards under the approval cards, the
+  question text in full and each lettered option a full-width
+  tappable row (letter in monospace, 48px floor). A tap POSTs to the
+  new `POST /api/asks/<nonce>` endpoint (token-gated like every /api
+  route), which records the answer exactly like a bound reply (a
+  console reply row plus the replies.jsonl line, body the bare
+  option key, so the asking process and every reply consumer see it)
+  and closes the thread itself; the option rows disable while the
+  request is in flight, a failure shows an inline error and
+  re-enables them, and the settled list shows the chosen letter in
+  green. An already-answered ask answers 200 again with the recorded
+  key and never writes a second reply row; an expired ask answers
+  409, an unknown nonce 404, a wrong key or a non-ask thread 400.
+
+- Session identity on every console stream row and detail event row:
+  each row renders the display name the enriched row itself carries
+  (the label when set, else the collision-proof unique suffix, the
+  one server-side display rule), and desktop rows add small adapter
+  and project badges under the name when the record carries them;
+  phone rows show the name only.
+
+- Group by session toggle in the console's live stream: a 44px chip
+  in the panel header flips between the flat newest-first list and
+  sections grouped by session, newest activity first, events
+  newest-first inside each section. A section header carries the
+  display name, a state chip, and a relative time, and tapping it
+  aims the sessions filter bar at that one session (the full session
+  id as the search term, the state chip reset). The choice lives in
+  memory, so repaints and SSE deltas keep honoring it and a fresh
+  page starts flat.
+
 - Markdown rendering for the console's session detail full-text
   blocks: the last prompt and the last response render through an
   escape-first renderer (every character of payload text reaches the
@@ -240,6 +272,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A console option tap no longer reads as an error inside the asking
+  process: the console ask endpoint closes the thread before it
+  records the reply row, and `tug ask` now treats the reply row it
+  sees after that close as the answer (matching the thread's
+  recorded key) instead of surfacing an already-answered race error.
 - `tug version` now reports the installed distribution version instead of a stale hardcoded 0.1.0.
 
 ## [0.2.0] - 2026-10-13

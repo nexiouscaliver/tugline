@@ -327,6 +327,8 @@ class ConsoleServer:
             return self._post_reply(body)
         if name == "approvals" and len(segments) == 3:
             return self._post_approval(segments[2], query)
+        if name == "asks" and len(segments) == 3:
+            return self._post_ask_answer(segments[2], body)
         return 404, {"error": "unknown endpoint"}
 
     def _put(self, name, segments, query, body):
@@ -511,6 +513,69 @@ class ConsoleServer:
         except KeyError:
             pass  # the thread row may not be ingested yet; the file is truth
         return 200, {"ok": True, "status": "answered", "decision": decision}
+
+    def _post_ask_answer(self, nonce, body):
+        """Answer one kind=ask thread from the console (an option tap).
+
+        The tap is recorded exactly like a bound reply: one store
+        reply row with source console plus the replies.jsonl line,
+        with the bare option key as the body so every existing ask
+        consumer (the runner's reply and journal paths alike) sees
+        it. The thread is also closed here, so the card flips without
+        waiting for the asking process to poll. An already-answered
+        ask is the approval endpoint's idempotent posture: 200 with
+        the recorded key and never a second reply row. An expired ask
+        cannot take an answer and answers 409.
+        """
+        if not _NONCE.match(nonce):
+            return 404, {"error": "unknown nonce"}
+        try:
+            data = json.loads(body.decode("utf-8"))
+        except (ValueError, UnicodeDecodeError):
+            return 400, {"error": "body must be json"}
+        if not isinstance(data, dict) or not isinstance(
+            data.get("key"), str
+        ):
+            return 400, {"error": "key must be a string"}
+        if not data["key"].strip():
+            return 400, {"error": "key must be an option letter"}
+        try:
+            thread = self.store.answer_ask_thread(nonce, data["key"])
+        except KeyError:
+            return 404, {"error": "unknown thread nonce"}
+        except ValueError as exc:
+            message = str(exc)
+            if "is not an ask" in message or "is not an option" in message:
+                return 400, {"error": message}
+            existing = self._find_thread(nonce)
+            if existing is None:
+                return 404, {"error": "unknown thread nonce"}
+            if existing.get("status") == "answered":
+                return 200, {
+                    "ok": True,
+                    "status": "already answered",
+                    "key": str(existing.get("answer") or ""),
+                    "thread": existing,
+                }
+            return 409, {"error": message}
+        reply = self.store.add_reply(
+            thread["answer"], thread_nonce=nonce, source="console"
+        )
+        self._append_reply_line(reply)
+        return 200, {
+            "ok": True,
+            "status": "answered",
+            "key": thread["answer"],
+            "thread": thread,
+            "reply": reply,
+        }
+
+    def _find_thread(self, nonce):
+        """One thread row by nonce through the public read, or None."""
+        for row in self.store.threads():
+            if row.get("nonce") == nonce:
+                return row
+        return None
 
     # -- state and replies.jsonl --
 
