@@ -105,6 +105,42 @@ def build_parser() -> argparse.ArgumentParser:
         "--json", action="store_true", help="one JSON array instead of rows"
     )
 
+    ask = sub.add_parser(
+        "ask",
+        help="ask the operator one multiple choice question and wait",
+    )
+    ask.add_argument(
+        "--session",
+        required=True,
+        help="session id asking (always explicit; no env fallback)",
+    )
+    ask.add_argument(
+        "--option",
+        action="append",
+        dest="options",
+        default=None,
+        metavar="OPTION",
+        help='lettered choice such as "A: description" (2-8, repeatable;'
+        " bare options are lettered automatically)",
+    )
+    ask.add_argument(
+        "--timeout",
+        type=int,
+        default=300,
+        help="seconds to wait for an answer (default 300, max 1800)",
+    )
+    ask.add_argument("question", help="the question text")
+
+    answer = sub.add_parser(
+        "answer", help="answer an ask thread (agent or controller side)"
+    )
+    answer.add_argument(
+        "--thread",
+        required=True,
+        help="the ask thread nonce",
+    )
+    answer.add_argument("key", help="the chosen option key")
+
     daemon = sub.add_parser("daemon", help="flush the spool and poll for replies")
     daemon.add_argument(
         "--once", action="store_true", help="run a single cycle and exit"
@@ -153,6 +189,8 @@ def main(argv=None) -> int:
         "tag": cmd_tag,
         "untag": cmd_untag,
         "sessions": cmd_sessions,
+        "ask": cmd_ask,
+        "answer": cmd_answer,
     }
     return handlers[args.command](args)
 
@@ -448,6 +486,101 @@ def cmd_sessions(args) -> int:
                 row.get("last_seen") or "",
             )
         )
+    return 0
+
+
+# -- the ask primitive (W9-L21) --
+#
+# tug ask blocks for up to the timeout, so it must never traceback:
+# every failure lands on a clean exit code (2 usage, 1 no answer).
+
+
+def _ask_runner(store, config):
+    from tugline.core.ask import AskRunner
+
+    return AskRunner(
+        store,
+        config=config,
+        replies_path=tugline_path("replies.jsonl"),
+        log=lambda line: print("tug: %s" % line, file=sys.stderr),
+    )
+
+
+def cmd_ask(args) -> int:
+    from tugline.core.ask import MAX_TIMEOUT_S, parse_options
+
+    question = " ".join(str(args.question or "").split())
+    if not question:
+        print("give a question", file=sys.stderr)
+        return 2
+    if not 1 <= args.timeout <= MAX_TIMEOUT_S:
+        print(
+            "timeout must be 1 to %d seconds" % MAX_TIMEOUT_S,
+            file=sys.stderr,
+        )
+        return 2
+    try:
+        options = parse_options(args.options or [])
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    try:
+        config = load_config()
+    except ConfigError as exc:
+        print("config error: %s" % exc, file=sys.stderr)
+        return 2
+    try:
+        store = _named_store()
+    except Exception as exc:
+        print("store error: %s" % exc, file=sys.stderr)
+        return 2
+    try:
+        result = _ask_runner(store, config).run(
+            args.session, question, options, timeout_s=args.timeout
+        )
+    except Exception as exc:  # the ask flow never tracebacks
+        print("ask error: %s" % exc, file=sys.stderr)
+        return 1
+    finally:
+        store.close()
+    if result["ok"]:
+        text = result.get("text") or ""
+        print(
+            "%s: %s" % (result["key"], text) if text else result["key"]
+        )
+        return 0
+    if result.get("reason") == "unknown session":
+        print(
+            "unknown session: %s (sessions come from spooled hook"
+            " events)" % args.session,
+            file=sys.stderr,
+        )
+        return 2
+    if result.get("reason") == "timeout":
+        print("no answer")
+        return 1
+    print("ask %s" % result.get("reason"), file=sys.stderr)
+    return 1
+
+
+def cmd_answer(args) -> int:
+    store = _named_store()
+    try:
+        row = store.answer_ask_thread(args.thread, args.key)
+    except KeyError:
+        print("unknown thread: %s" % args.thread, file=sys.stderr)
+        return 2
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    finally:
+        store.close()
+    text = ""
+    for option in row.get("options") or []:
+        if str(option.get("key")) == str(row.get("answer")):
+            text = str(option.get("text") or "")
+            break
+    print("%s: %s" % (row["answer"], text) if text else row["answer"])
     return 0
 
 
