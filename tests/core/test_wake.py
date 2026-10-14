@@ -229,7 +229,9 @@ def test_wake_unknown_session_skips_without_crashing(tmp_path):
 
 
 def test_wake_unsupported_adapter_queues_for_injection(tmp_path):
-    seed_store(tmp_path, adapter="zcode")
+    # zcode gained its own driver (test_wake_zcode), so the
+    # unsupported rail runs on an adapter no build will know
+    seed_store(tmp_path, adapter="cursor")
     append_reply(tmp_path)
     spawn = FakeSpawn()
     logs = []
@@ -238,7 +240,7 @@ def test_wake_unsupported_adapter_queues_for_injection(tmp_path):
     assert dispatcher.poll() == 0
     assert spawn.calls == []
     assert (
-        "wake unsupported for adapter zcode,"
+        "wake unsupported for adapter cursor,"
         " reply queued for next-boundary injection" in logs
     )
     # the reply stays consumable by the injection path

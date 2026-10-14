@@ -57,7 +57,7 @@ def test_schema_version_five_and_tables_created(tmp_path):
     version = store.conn.execute(
         "SELECT value FROM meta WHERE key = 'schema_version'"
     ).fetchone()[0]
-    assert version == "5"
+    assert version == "6"
     names = {
         row[0]
         for row in store.conn.execute(
@@ -68,7 +68,7 @@ def test_schema_version_five_and_tables_created(tmp_path):
     event_cols = {
         row[1] for row in store.conn.execute("PRAGMA table_info(events)")
     }
-    assert {"adapter", "project", "cwd"} <= event_cols
+    assert {"adapter", "project", "cwd", "response_preview"} <= event_cols
     session_cols = {
         row[1] for row in store.conn.execute("PRAGMA table_info(sessions)")
     }
@@ -90,11 +90,46 @@ def test_version_one_store_migrates_events_columns(tmp_path):
     version = store.conn.execute(
         "SELECT value FROM meta WHERE key = 'schema_version'"
     ).fetchone()[0]
-    assert version == "5"
+    assert version == "6"
     event_cols = {
         row[1] for row in store.conn.execute("PRAGMA table_info(events)")
     }
-    assert {"project", "cwd"} <= event_cols
+    assert {"project", "cwd", "response_preview"} <= event_cols
+    store.close()
+
+
+def test_version_four_store_migrates_response_preview(tmp_path):
+    path = tmp_path / "store" / "tugline.db"
+    path.parent.mkdir(parents=True)
+    conn = sqlite3.connect(path)
+    for version, sql in MIGRATIONS:  # build a version-four store: 1..4 only
+        if version >= 5:
+            break
+        conn.executescript(sql)
+    conn.execute(
+        "INSERT INTO events (spool_id, ts, session_id, event, title, body)"
+        " VALUES ('old1', '2026-10-13T00:00:00+00:00', 's1', 'stop',"
+        " 't', 'b')"
+    )
+    conn.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT)")
+    conn.execute("INSERT INTO meta VALUES ('schema_version', '4')")
+    conn.commit()
+    conn.close()
+
+    store = Store(path)
+    version = store.conn.execute(
+        "SELECT value FROM meta WHERE key = 'schema_version'"
+    ).fetchone()[0]
+    assert version == "6"
+    event_cols = {
+        row[1] for row in store.conn.execute("PRAGMA table_info(events)")
+    }
+    assert "response_preview" in event_cols
+    # the pre-existing row backfills to the empty string, not NULL
+    (preview,) = store.conn.execute(
+        "SELECT response_preview FROM events WHERE spool_id = 'old1'"
+    ).fetchone()
+    assert preview == ""
     store.close()
 
 
@@ -264,6 +299,143 @@ def test_unenriched_record_leaves_session_enrichment_alone(tmp_path):
     by_title = {e["title"]: e for e in store.events()}
     assert by_title["plain"]["adapter"] == ""
     assert by_title["plain"]["project"] == ""
+    store.close()
+
+
+# -- response previews (schema v5) --
+
+
+def test_ingest_persists_response_preview(tmp_path):
+    spool_root = tmp_path / "spool"
+    write(
+        spool_root,
+        now=WHEN,
+        event="stop",
+        extra={"response_preview": "all tests passed"},
+    )
+    store = open_store(tmp_path)
+    store.ingest_spool(str(spool_root))
+    (row,) = store.events()
+    assert row["response_preview"] == "all tests passed"
+    store.close()
+
+
+def test_record_without_preview_keeps_empty_string(tmp_path):
+    spool_root = tmp_path / "spool"
+    write(spool_root, now=WHEN)
+    store = open_store(tmp_path)
+    store.ingest_spool(str(spool_root))
+    (row,) = store.events()
+    assert row["response_preview"] == ""
+    store.close()
+
+
+# -- session detail --
+
+
+def test_session_detail_fields(tmp_path):
+    spool_root = tmp_path / "spool"
+    write(
+        spool_root,
+        now=WHEN,
+        event="userpromptsubmit",
+        title="prompt submitted",
+        body="fix the login bug",
+    )
+    write(
+        spool_root,
+        now=WHEN + timedelta(minutes=1),
+        event="notify",
+        title="working",
+        body="editing files",
+    )
+    write(
+        spool_root,
+        now=LATER,
+        event="stop",
+        title="stopped",
+        body="session s1 stopped",
+        extra={"response_preview": "login bug fixed"},
+    )
+    store = open_store(tmp_path)
+    store.ingest_spool(str(spool_root))
+    store.add_session_tag("s1", "bugfix")
+
+    detail = store.session_detail("s1")
+    assert detail["session"]["session_id"] == "s1"
+    assert detail["session"]["state"] == "done"
+    assert detail["session"]["tags"] == ["bugfix"]
+    assert detail["last_prompt"] == "fix the login bug"
+    assert detail["last_response"] == "login bug fixed"
+    # newest first, every stored field on the rows
+    assert [e["event"] for e in detail["events"]] == [
+        "stop",
+        "notify",
+        "userpromptsubmit",
+    ]
+    for row in detail["events"]:
+        assert row["session_id"] == "s1"
+        assert "response_preview" in row
+        assert "delivered" in row
+    store.close()
+
+
+def test_session_detail_newest_nonempty_response_wins(tmp_path):
+    spool_root = tmp_path / "spool"
+    write(
+        spool_root,
+        now=WHEN,
+        event="stop",
+        extra={"response_preview": "older answer"},
+    )
+    # a stop with no preview must never win over an older one that has it
+    write(spool_root, now=LATER, event="stop", extra={})
+    write(
+        spool_root,
+        now=LATER + timedelta(minutes=1),
+        event="stop",
+        extra={"response_preview": "newest answer"},
+    )
+    store = open_store(tmp_path)
+    store.ingest_spool(str(spool_root))
+    detail = store.session_detail("s1")
+    assert detail["last_response"] == "newest answer"
+    store.close()
+
+
+def test_session_detail_without_prompt_or_response(tmp_path):
+    spool_root = tmp_path / "spool"
+    write(spool_root, now=WHEN, event="notify")
+    store = open_store(tmp_path)
+    store.ingest_spool(str(spool_root))
+    detail = store.session_detail("s1")
+    assert detail["last_prompt"] == ""
+    assert detail["last_response"] == ""
+    store.close()
+
+
+def test_session_detail_events_cap_at_100(tmp_path):
+    spool_root = tmp_path / "spool"
+    for i in range(105):
+        write(
+            spool_root,
+            now=WHEN + timedelta(seconds=i),
+            title="e%03d" % i,
+        )
+    store = open_store(tmp_path)
+    store.ingest_spool(str(spool_root))
+    detail = store.session_detail("s1")
+    assert len(detail["events"]) == 100
+    # the newest 100, newest first: e104 down to e005
+    assert detail["events"][0]["title"] == "e104"
+    assert detail["events"][-1]["title"] == "e005"
+    store.close()
+
+
+def test_session_detail_unknown_session_raises(tmp_path):
+    store = open_store(tmp_path)
+    with pytest.raises(KeyError):
+        store.session_detail("ghost")
     store.close()
 
 

@@ -51,6 +51,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Store migrations are in place from v4 (existing labels and tags
   ride over untouched; v4 sessions without labels can still be
   auto-labeled by their next prompt).
+- Session detail page in the console: tapping a session card (phone)
+  or table row (desktop) opens a full detail view with everything
+  about the session. Store schema v5 adds
+  `events.response_preview` (empty string on every existing row);
+  both adapters' stop records now carry a 600-character one-line
+  preview of the turn's last assistant message as record enrichment
+  (titles, bodies, and priorities unchanged), and
+  `Store.session_detail(session_id)` reads back the session row with
+  tags, the newest userpromptsubmit body as `last_prompt`, the newest
+  non-empty stop preview as `last_response`, and the newest 100
+  events. `GET /api/sessions/<id>` serves it under the same token
+  gate as every other read, with the session row decorated exactly
+  like the sessions list. The web UI detail page shows a header line
+  (label or id, display id, state chip, adapter and project badges),
+  a meta grid (first seen, last seen, cwd, tags), big-target actions
+  (reply to this session, rename, add/remove tags), the last prompt,
+  the last response preview, and the session's events with delivery
+  chips; it refreshes on every delta and a `< back` button (44px)
+  returns to the previous tab/panel state. The fiddly inline
+  rename/tag controls are gone from the session cards (mobile cards
+  keep name/id, state, adapter, time, and last event text only);
+  every control now lives on the detail page with 44px targets.
+
 - Wake-on-reply: a reply bound to a session that lands while the
   session looks idle (its last spooled event a stop or a session
   start) wakes it at once instead of waiting for the next turn
@@ -73,13 +96,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   verification. Console reply lines now carry their session binding
   (`session_id`), and the replies view shows a wake-state chip per
   reply (dispatched, finished, timed_out, unsupported, skipped, or
-  none). Stated plainly: this change ships no zcode wake driver; the
-  ZCode app bundles a CLI (zcode.cjs v0.16.9) with documented
-  headless resume flags (-p, --resume, --cwd), and wiring that driver
-  is a queued follow-up lane. Until it lands, replies to idle zcode
-  sessions are journaled unsupported and stay queued for the session's
-  next-boundary injection. The daemon's `--once` cycle result gains a
-  `wakes` count.
+  none). The daemon's `--once` cycle result gains a `wakes` count.
+- zcode wake driver: replies to idle zcode sessions wake them through
+  the CLI the ZCode desktop app bundles, spawned as `node
+  /Applications/ZCode.app/Contents/Resources/glm/zcode.cjs --resume
+  <session> -p "<body>" --cwd <project dir>`. Every flag was verified
+  against the bundled CLI's own help (v0.16.9): `-p, --prompt <text>`
+  runs a single prompt without opening the TUI, `--resume
+  <sessionId>` resumes a persisted session, `--cwd <path>` sets the
+  working directory; `--mode` is deliberately not passed because help
+  documents yolo as the default permission mode for `--prompt`, and
+  nothing is attached (the reply body is the whole prompt). The
+  command template is config-driven through `wake.zcode_command`, and
+  `wake.adapters` now defaults to `["claude", "zcode"]` (existing
+  configs that list adapters explicitly keep their list). The path is
+  the app-bundled CLI, so the driver is version-locked to the
+  installed ZCode app: if an app update moves the bundle, re-point
+  `wake.zcode_command`. An adapter with no driver entry (anything
+  but claude and zcode) is still journaled unsupported and stays
+  queued for the session's next-boundary injection.
 - Session tags, settable by the operator and by agents: a new `tags`
   table (schema version 4; existing stores migrate in place) holds up
   to 8 tags per session, each lowercase [a-z0-9-], at most 24

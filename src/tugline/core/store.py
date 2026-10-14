@@ -21,7 +21,9 @@ that log into tables a console can query in one place:
 - events: every spool record, one row per record id. spool_id is
   UNIQUE, which with a SELECT check is what makes ingest idempotent.
   Rows carry the adapter/project/cwd session fields when the record
-  has them, "" otherwise.
+  has them, "" otherwise, and (schema v5) the response_preview stop
+  records carry for the console's session detail ("" on every other
+  record).
 - threads: one row per approval nonce parsed out of permissionrequest
   action urls, carried from open to answered or expired by the files
   under the approvals root. Ask threads (W9-L21) live in the same
@@ -156,6 +158,12 @@ MIGRATIONS = [
     ),
     (
         5,
+        """
+        ALTER TABLE events ADD COLUMN response_preview TEXT NOT NULL DEFAULT '';
+        """,
+    ),
+    (
+        6,
         """
         ALTER TABLE sessions ADD COLUMN label_source TEXT;
         ALTER TABLE threads ADD COLUMN options TEXT;
@@ -434,33 +442,51 @@ class Store:
         Store() opens racing on the same file (the console's ingest
         thread and a CLI command, say) serialize on BEGIN IMMEDIATE,
         and the loser then sees the winner's version and skips
-        instead of replaying applied migrations.
+        instead of replaying applied migrations. SQLite can still
+        hand SQLITE_BUSY to these statements without consulting the
+        busy timeout while a concurrent opener is mid WAL transition
+        (observed on python 3.14), so the whole block retries with
+        backoff; the version re-read makes a retry safe.
         """
+        last = None
         with self._lock:
-            self.conn.execute(
-                "CREATE TABLE IF NOT EXISTS meta ("
-                "key TEXT PRIMARY KEY, value TEXT)"
-            )
-            for version, sql in MIGRATIONS:
-                self.conn.execute("BEGIN IMMEDIATE")
+            for attempt in range(20):
                 try:
-                    row = self.conn.execute(
-                        "SELECT value FROM meta WHERE key = ?",
-                        (SCHEMA_VERSION_KEY,),
-                    ).fetchone()
-                    current = int(row[0]) if row is not None else 0
-                    if version > current:
-                        for stmt in _statements(sql):
-                            self.conn.execute(stmt)
-                        self.conn.execute(
-                            "INSERT OR REPLACE INTO meta (key, value)"
-                            " VALUES (?, ?)",
-                            (SCHEMA_VERSION_KEY, str(version)),
-                        )
-                    self.conn.execute("COMMIT")
-                except BaseException:
-                    self.conn.execute("ROLLBACK")
-                    raise
+                    self.conn.execute(
+                        "CREATE TABLE IF NOT EXISTS meta ("
+                        "key TEXT PRIMARY KEY, value TEXT)"
+                    )
+                    for version, sql in MIGRATIONS:
+                        self.conn.execute("BEGIN IMMEDIATE")
+                        try:
+                            row = self.conn.execute(
+                                "SELECT value FROM meta WHERE key = ?",
+                                (SCHEMA_VERSION_KEY,),
+                            ).fetchone()
+                            current = int(row[0]) if row is not None else 0
+                            if version > current:
+                                for stmt in _statements(sql):
+                                    self.conn.execute(stmt)
+                                self.conn.execute(
+                                    "INSERT OR REPLACE INTO meta (key, value)"
+                                    " VALUES (?, ?)",
+                                    (SCHEMA_VERSION_KEY, str(version)),
+                                )
+                            self.conn.execute("COMMIT")
+                        except BaseException:
+                            try:
+                                self.conn.execute("ROLLBACK")
+                            except sqlite3.OperationalError:
+                                pass  # nothing to roll back
+                            raise
+                    return
+                except sqlite3.OperationalError as exc:
+                    message = str(exc).lower()
+                    if "lock" not in message and "busy" not in message:
+                        raise
+                    last = exc
+                    time.sleep(0.01 * (attempt + 1))
+            raise last
 
     # -- ingest --
 
@@ -516,8 +542,8 @@ class Store:
     def _insert_event(self, rec, rid):
         self.conn.execute(
             "INSERT INTO events (spool_id, ts, session_id, adapter, event,"
-            " topic, priority, title, body, project, cwd)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " topic, priority, title, body, project, cwd, response_preview)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 rid,
                 str(rec.get("ts") or ""),
@@ -530,6 +556,7 @@ class Store:
                 str(rec.get("body") or ""),
                 _carried(rec, "project"),
                 _carried(rec, "cwd"),
+                _carried(rec, "response_preview"),
             ),
         )
 
@@ -1232,6 +1259,47 @@ class Store:
             item["display_id"] = display.get(sid, "")
             out.append(item)
         return out
+
+    def session_detail(self, session_id) -> dict:
+        """One session with everything about it, in one read.
+
+        Returns a dict with the session row (tags attached, like every
+        session row this store hands back), last_prompt (the body of
+        the newest userpromptsubmit event for the session, "" when
+        there is none), last_response (the newest non-empty
+        response_preview among the session's stop events, "" when no
+        stop event carries one), and events (the newest 100 events for
+        the session, all stored fields, newest first). Event names are
+        matched case-insensitively, the same leniency _session_state
+        applies. Raises KeyError for a session id the store has never
+        seen.
+        """
+        session_id = str(session_id)
+        row = self.conn.execute(
+            "SELECT 1 FROM sessions WHERE session_id = ?", (session_id,)
+        ).fetchone()
+        if row is None:
+            raise KeyError("unknown session: %r" % session_id)
+        prompt_row = self.conn.execute(
+            "SELECT body FROM events WHERE session_id = ?"
+            " AND LOWER(event) = 'userpromptsubmit'"
+            " ORDER BY ts DESC, id DESC LIMIT 1",
+            (session_id,),
+        ).fetchone()
+        response_row = self.conn.execute(
+            "SELECT response_preview FROM events WHERE session_id = ?"
+            " AND LOWER(event) = 'stop' AND response_preview != ''"
+            " ORDER BY ts DESC, id DESC LIMIT 1",
+            (session_id,),
+        ).fetchone()
+        return {
+            "session": self._session_row(session_id),
+            "last_prompt": prompt_row[0] if prompt_row is not None else "",
+            "last_response": (
+                response_row[0] if response_row is not None else ""
+            ),
+            "events": self.events(limit=100, session_id=session_id),
+        }
 
     def threads(self, status=None) -> list:
         """Threads newest first; one status when given. Ask rows come

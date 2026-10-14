@@ -23,14 +23,18 @@
  * shows pending (delivered 0) or delivered (delivered 1), where
  * delivered means the daemon handled the record, published or not.
  *
- * Session identity is operator-first: each row carries a rename
- * affordance backed by PUT /api/sessions/<id>/label, and when a label
- * is set it is the primary name (the id drops to a small secondary
- * line). Sessions also carry tags: small chips with a remove x plus
- * a tag link that opens an inline add editor, backed by PUT and
- * DELETE /api/sessions/<id>/tag/<tag>. Tags are lowercase letters,
- * digits, and hyphens (the server normalizes; anything else in the
- * input is dropped). Ids shown anywhere are display_id values
+ * Session identity is operator-first, and every control lives on the
+ * session detail page. Tapping a card (phone) or a table row (desktop)
+ * opens the detail: header line (label or id, display id, state chip,
+ * adapter and project badges), meta grid (first seen, last seen, cwd,
+ * tags), big-target actions (reply, rename through PUT
+ * /api/sessions/<id>/label, tags through PUT and DELETE
+ * /api/sessions/<id>/tag/<tag>), the last prompt body, the last stop
+ * response preview, and the session's newest events. The list cards
+ * themselves are read-only: name/id line, state chip, adapter,
+ * relative time, last event text, nothing else. Tags are lowercase
+ * letters, digits, and hyphens (the server normalizes; anything else
+ * in the input is dropped). Ids shown anywhere are display_id values
  * computed per response by the server: suffixes lengthened until
  * unique, so two sessions sharing a tail never render the same short
  * id. State chips read display_state (active now, running, waiting
@@ -76,6 +80,8 @@ const state = {
   lastIngestMs: null,
   selected: null, // {kind: "session"|"thread", id: "..."} or null
   activeTab: "sessions",
+  detailId: null, // the session whose detail page is open, or null
+  detail: null, // the last /api/sessions/<id> payload for that page
 };
 
 let stream = null; // the EventSource, or null before the first open
@@ -170,9 +176,11 @@ function isMobile() {
 // Exactly one panel carries "active"; the mobile stylesheet hides the
 // rest. Switching is instant (no animation) and starts each panel at
 // the top of the page. On desktop the class has no styling, so all
-// four panels keep their grid seats.
+// four panels keep their grid seats. Picking a tab also closes the
+// session detail: tabs and the detail page share the panel area.
 function showTab(name) {
   state.activeTab = name;
+  closeDetail();
   for (const tab of TABS) {
     const on = tab === name;
     $("tab-" + tab).classList.toggle("active", on);
@@ -283,22 +291,51 @@ function lastEventFor(session) {
   );
 }
 
-// Mobile: tapping a card picks that session and jumps straight to the
-// reply tab. Pick who, then write. There is no toggle-off here; the
-// reply box explains itself when no target is set.
-function pickSession(sessionId) {
-  state.selected = { kind: "session", id: sessionId };
-  paintSessions();
-  paintStream(); // the loaded window is filtered client side right away
-  paintTarget();
-  showTab("reply");
-  refreshEvents(); // then a session-scoped window replaces it
+// Tapping a card (phone) or row (desktop) opens the session detail
+// page. Pick who, then act: reply, rename, and tags all live there.
+function openDetail(sessionId) {
+  state.detailId = sessionId;
+  state.detail = null;
+  document.body.classList.add("detail-open");
+  // phones: the detail takes the panel area above the tab bar, the
+  // same seat any tab panel occupies; the tab bar itself stays put
+  for (const tab of TABS) $(tab + "-panel").classList.remove("active");
+  $("detail-panel").classList.add("active");
+  renderDetail();
+  if (isMobile()) window.scrollTo(0, 0);
+  refreshDetail();
+}
+
+function closeDetail() {
+  if (state.detailId === null) return;
+  state.detailId = null;
+  state.detail = null;
+  document.body.classList.remove("detail-open");
+  $("detail-panel").classList.remove("active");
+}
+
+function goBackFromDetail() {
+  // back returns to the previous tab/panel state, unchanged
+  closeDetail();
+  if (isMobile()) showTab(state.activeTab);
+}
+
+async function refreshDetail() {
+  if (state.detailId === null) return;
+  try {
+    state.detail = await api(
+      "/api/sessions/" + encodeURIComponent(state.detailId)
+    );
+    renderDetail();
+  } catch (err) {
+    // keep the last painted detail; the next delta retries
+  }
 }
 
 function idCellContent(session) {
   // the label is the primary name when set; the collision-proof short
-  // id is always visible beside or beneath it; tags render as chips
-  // with a remove x, plus a link that adds one more
+  // id is always visible beside or beneath it. Cards carry no
+  // controls: rename and tags live on the detail page only
   const wrap = el("div", "idwrap");
   const shown = String(session.display_id || short8(session.session_id));
   const button = el(
@@ -308,109 +345,262 @@ function idCellContent(session) {
   );
   button.type = "button";
   button.title = session.session_id;
-  button.setAttribute(
-    "aria-pressed",
-    String(isSelected("session", session.session_id))
-  );
-  button.addEventListener("click", () => {
-    if (isMobile()) return; // the card handler catches the tap above
-    toggleSession(session.session_id);
+  button.addEventListener("click", (event) => {
+    // the row handler opens the detail for every tap; the button only
+    // keeps a keyboard path to the same place (stopPropagation stops
+    // the row handler from opening it twice)
+    event.stopPropagation();
+    openDetail(session.session_id);
   });
   wrap.append(button);
   if (session.label) wrap.append(el("div", "idsub", shown));
-  wrap.append(tagChips(session));
-  const rename = el("button", "linkish rename", "rename");
-  rename.type = "button";
-  rename.title = "set a label for this session";
-  rename.addEventListener("click", (event) => {
-    // stop the bubble so the phone card tap never selects the session
-    event.stopPropagation();
-    startRename(session, wrap);
-  });
-  wrap.append(rename);
   return wrap;
 }
 
-// -- tags: chips with remove, an inline add editor --
+// -- the session detail page --
 
-function tagChips(session) {
-  const line = el("div", "tagline");
+function detailHead(session) {
+  const head = el("div", "detail-head");
+  const nameBlock = el("div", "detail-nameblock");
+  const shown = String(session.display_id || short8(session.session_id));
+  const idLine = el("div", "detail-idmono", shown);
+  // hover or long-press reveals the full id when the short one is not
+  // enough (the events rows and the store agree on this display id)
+  idLine.title = String(session.session_id);
+  nameBlock.append(
+    el("div", "detail-title", String(session.label || shown)),
+    idLine
+  );
+  const badges = el("div", "detail-badges");
+  const stateName = String(session.display_state || session.state || "running");
+  badges.append(
+    el(
+      "span",
+      "chip chip-state chip-" + (STATE_TONES[stateName] || "gray"),
+      STATE_LABELS[stateName] || stateName
+    )
+  );
+  if (session.adapter) {
+    badges.append(el("span", "chip chip-gray", String(session.adapter)));
+  }
+  if (session.project) {
+    badges.append(el("span", "chip chip-gray", String(session.project)));
+  }
+  head.append(nameBlock, badges);
+  return head;
+}
+
+function detailMeta(session) {
+  const grid = el("dl", "detail-meta");
+  const add = (label, value, valueClass) => {
+    const dd = el("dd", valueClass || null);
+    if (value instanceof Node) dd.append(value);
+    else dd.textContent = String(value);
+    grid.append(el("dt", null, label), dd);
+  };
+  const when = (iso) => {
+    const ms = parseTs(iso);
+    const node = el("span", "mono-time", relTime(ms));
+    node.dataset.rel = ms === null ? "" : String(ms);
+    node.title = String(iso || "");
+    return node;
+  };
+  add("first seen", when(session.first_seen));
+  add("last seen", when(session.last_seen));
+  add("cwd", String(session.cwd || "-"), "mono-wrap");
+  const tags = session.tags || [];
+  add("tags", tags.join(", ") || "none", tags.length ? "mono-wrap" : "muted");
+  return grid;
+}
+
+// chips with a real 44px x each; they live here, never on the cards
+function detailTagChips(session) {
+  const line = el("div", "tagline detail-tagline");
   for (const tag of session.tags || []) {
     const chip = el("span", "tagchip", String(tag));
     const remove = el("button", "tagx", "x");
     remove.type = "button";
     remove.title = "remove tag " + tag;
     remove.setAttribute("aria-label", "remove tag " + tag);
-    remove.addEventListener("click", (event) => {
-      // stop the bubble so the phone card tap never selects too
-      event.stopPropagation();
-      removeTag(session, tag);
+    remove.addEventListener("click", async () => {
+      try {
+        await addOrRemoveTag(session, tag, "DELETE");
+        await Promise.all([refreshDetail(), refreshSessions()]);
+      } catch (err) {
+        // removal cannot fail for a missing tag; the repaint shows truth
+      }
     });
     chip.append(remove);
     line.append(chip);
   }
-  const add = el("button", "linkish tagadd", "tag");
-  add.type = "button";
-  add.title = "add a tag to this session";
-  add.addEventListener("click", (event) => {
-    // stop the bubble so the phone card tap never selects the session
-    event.stopPropagation();
-    startAddTag(session, line);
-  });
-  line.append(add);
+  if (!(session.tags || []).length) {
+    line.append(el("span", "muted", "no tags yet"));
+  }
   return line;
 }
 
-function startAddTag(session, line) {
-  // one inline editor in place of the chips: enter adds (the server
-  // normalizes to lowercase letters, digits, hyphens), escape or blur
-  // cancels
-  const input = document.createElement("input");
-  input.type = "text";
-  input.className = "rename-input tag-input";
-  input.maxLength = 24;
-  input.placeholder = "tag (a-z, 0-9, -)";
-  // taps inside the editor must not bubble into the phone card
-  // handler, which would repaint the table and close this editor
-  input.addEventListener("click", (event) => event.stopPropagation());
-  const hint = el("span", "taghint", "enter adds, esc cancels");
-  hint.addEventListener("click", (event) => event.stopPropagation());
-  line.replaceChildren(input, hint);
-  input.focus();
-  let settled = false;
-  const finish = async (save) => {
-    if (settled) return;
-    if (!save) {
-      settled = true;
-      paintSessions();
-      return;
-    }
-    const value = input.value.trim();
-    if (!value) {
-      settled = true;
-      paintSessions();
-      return;
-    }
-    try {
-      await addOrRemoveTag(session, value, "PUT");
-      settled = true;
-      await refreshSessions();
-    } catch (err) {
-      hint.textContent = "add failed: " + err.message;
-      input.focus();
-    }
-  };
-  input.addEventListener("keydown", (event) => {
-    if (event.key === "Enter") {
-      event.preventDefault();
-      finish(true);
-    } else if (event.key === "Escape") {
-      event.preventDefault();
-      finish(false);
+function detailActions(session) {
+  const wrap = el("div", "detail-actions");
+
+  const reply = el(
+    "button",
+    "btn btn-primary detail-replybtn",
+    "Reply to this session"
+  );
+  reply.type = "button";
+  reply.addEventListener("click", () => {
+    state.selected = { kind: "session", id: session.session_id };
+    paintTarget();
+    if (isMobile()) {
+      showTab("reply"); // closes the detail, lands on the reply box
+    } else {
+      $("reply-body").focus();
     }
   });
-  input.addEventListener("blur", () => finish(false));
+  wrap.append(reply);
+
+  // rename: input + save, both 44px; an empty value clears the label
+  const renameLine = el("div", "detail-control");
+  renameLine.append(el("span", "ctl-label", "rename"));
+  const renameInput = document.createElement("input");
+  renameInput.type = "text";
+  renameInput.className = "detail-input";
+  renameInput.id = "detail-rename-input";
+  renameInput.maxLength = 60;
+  renameInput.value = String(session.label || "");
+  renameInput.placeholder = "label (empty clears)";
+  renameInput.setAttribute("aria-label", "rename this session");
+  const renameSave = el("button", "btn", "save");
+  renameSave.type = "button";
+  const renameError = el("p", "error");
+  renameError.hidden = true;
+  const saveRename = async () => {
+    renameError.hidden = true;
+    try {
+      await api(
+        "/api/sessions/" +
+          encodeURIComponent(session.session_id) +
+          "/label",
+        {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ label: renameInput.value.trim() }),
+        }
+      );
+      await Promise.all([refreshDetail(), refreshSessions()]);
+    } catch (err) {
+      renameError.textContent = "save failed: " + err.message;
+      renameError.hidden = false;
+    }
+  };
+  renameSave.addEventListener("click", saveRename);
+  renameInput.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      saveRename();
+    }
+  });
+  renameLine.append(renameInput, renameSave);
+  wrap.append(renameLine, renameError);
+
+  // add tag: input + add button, chips with x beneath, all 44px
+  const tagLine = el("div", "detail-control");
+  tagLine.append(el("span", "ctl-label", "add tag"));
+  const tagInput = document.createElement("input");
+  tagInput.type = "text";
+  tagInput.className = "detail-input";
+  tagInput.id = "detail-tag-input";
+  tagInput.maxLength = 24;
+  tagInput.placeholder = "tag (a-z, 0-9, -)";
+  tagInput.setAttribute("aria-label", "add a tag to this session");
+  const tagAdd = el("button", "btn", "add");
+  tagAdd.type = "button";
+  const tagError = el("p", "error");
+  tagError.hidden = true;
+  const saveTag = async () => {
+    tagError.hidden = true;
+    const value = tagInput.value.trim();
+    if (!value) return;
+    try {
+      await addOrRemoveTag(session, value, "PUT");
+      tagInput.value = "";
+      await Promise.all([refreshDetail(), refreshSessions()]);
+    } catch (err) {
+      tagError.textContent = "add failed: " + err.message;
+      tagError.hidden = false;
+    }
+  };
+  tagAdd.addEventListener("click", saveTag);
+  tagInput.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      saveTag();
+    }
+  });
+  tagLine.append(tagInput, tagAdd);
+  wrap.append(tagLine, detailTagChips(session), tagError);
+  return wrap;
 }
+
+function detailTextBlock(label, text, absentLine) {
+  const block = el("section", "detail-block");
+  block.append(el("h3", null, label));
+  const value = String(text || "");
+  block.append(
+    value
+      ? el("p", "detail-text", value)
+      : el("p", "empty", absentLine)
+  );
+  return block;
+}
+
+function renderDetail() {
+  const box = $("detail-body");
+  if (state.detailId === null) {
+    box.replaceChildren();
+    return;
+  }
+  if (state.detail === null) {
+    box.replaceChildren(el("p", "empty", "loading session detail"));
+    return;
+  }
+  // a repaint must never yank an input the operator is typing into;
+  // the first delta after the blur brings the page current again
+  const focused = document.activeElement;
+  if (focused && focused.tagName === "INPUT" && box.contains(focused)) {
+    return;
+  }
+
+  const detail = state.detail;
+  const session = detail.session;
+  const parts = [
+    detailHead(session),
+    detailMeta(session),
+    detailActions(session),
+    detailTextBlock("last prompt", detail.last_prompt, "no prompt recorded yet"),
+    detailTextBlock(
+      "last response",
+      detail.last_response,
+      "no response preview recorded yet"
+    ),
+  ];
+
+  const events = el("section", "detail-block");
+  events.append(el("h3", null, "events"));
+  const list = el("ol", "stream detail-events");
+  list.append(...(detail.events || []).map(streamRow));
+  const scroll = el("div", "scroll");
+  scroll.append(list);
+  events.append(scroll);
+  if (!detail.events || detail.events.length === 0) {
+    events.append(el("p", "empty", "no events for this session yet"));
+  }
+  parts.push(events);
+
+  box.replaceChildren(...parts);
+}
+
+// -- tags: the one PUT/DELETE path the detail controls share --
 
 async function addOrRemoveTag(session, tag, method) {
   await api(
@@ -422,80 +612,12 @@ async function addOrRemoveTag(session, tag, method) {
   );
 }
 
-async function removeTag(session, tag) {
-  try {
-    await addOrRemoveTag(session, tag, "DELETE");
-    await refreshSessions();
-  } catch (err) {
-    // removal cannot fail for a missing tag; a network or auth error
-    // surfaces on the next repaint anyway
-  }
-}
-
-function startRename(session, wrap) {
-  // one inline editor in place of the name: enter saves, escape or
-  // blur cancels; an empty value clears the label
-  const input = document.createElement("input");
-  input.type = "text";
-  input.className = "rename-input";
-  input.value = String(session.label || "");
-  input.maxLength = 60;
-  input.placeholder = "label (empty clears)";
-  // taps inside the editor must not bubble into the phone card
-  // handler, which would repaint the table and close this editor
-  input.addEventListener("click", (event) => event.stopPropagation());
-  const hint = el("div", "idsub", "enter saves, esc cancels");
-  hint.addEventListener("click", (event) => event.stopPropagation());
-  wrap.replaceChildren(input, hint);
-  input.focus();
-  input.select();
-  let settled = false;
-  const finish = async (save) => {
-    if (settled) return;
-    if (!save) {
-      settled = true;
-      paintSessions();
-      return;
-    }
-    try {
-      await api(
-        "/api/sessions/" +
-          encodeURIComponent(session.session_id) +
-          "/label",
-        {
-          method: "PUT",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ label: input.value.trim() }),
-        }
-      );
-      settled = true;
-      await refreshSessions();
-    } catch (err) {
-      hint.textContent = "save failed: " + err.message;
-      input.focus();
-    }
-  };
-  input.addEventListener("keydown", (event) => {
-    if (event.key === "Enter") {
-      event.preventDefault();
-      finish(true);
-    } else if (event.key === "Escape") {
-      event.preventDefault();
-      finish(false);
-    }
-  });
-  input.addEventListener("blur", () => finish(false));
-}
-
 function sessionRow(session) {
   const row = document.createElement("tr");
   if (isSelected("session", session.session_id)) row.classList.add("selected");
 
-  // the whole card is the tap target on phones; on desktop the row
-  // stays inert and only the name link selects
-  row.addEventListener("click", () => {
-    if (isMobile()) pickSession(session.session_id);
-  });
+  // the whole row is the detail target, phones and desktop alike
+  row.addEventListener("click", () => openDetail(session.session_id));
 
   row.append(stateCell(session));
 
@@ -735,15 +857,10 @@ function paintReplies() {
 
 // -- selection --
 
-function toggleSession(sessionId) {
-  state.selected = isSelected("session", sessionId)
-    ? null
-    : { kind: "session", id: sessionId };
-  paintSessions();
-  paintStream(); // the loaded window is filtered client side right away
-  paintTarget();
-  refreshEvents(); // then a session-scoped window replaces it
-}
+// Session selection (the reply target) is set from the detail page's
+// reply button and from ask reply links; thread selection toggles
+// from the asks panel. The stream panel filters to the selected
+// session client side.
 
 function toggleThread(nonce) {
   state.selected = isSelected("thread", nonce) ? null : { kind: "thread", id: nonce };
@@ -869,6 +986,7 @@ function applyState(payload) {
   paintAsks();
   paintReplies();
   paintTarget();
+  if (state.detailId !== null) refreshDetail(); // the open detail rides along
 }
 
 // -- live stream connection --
@@ -893,6 +1011,7 @@ function onDelta(delta) {
   const counts = delta.counts || {};
   refreshEvents(); // always: repaint the stream from a cheap refetch
   if (counts.sessions) refreshSessions();
+  if (state.detailId !== null) refreshDetail(); // the open detail page rides along
   if (counts.threads || counts.answered || counts.open || counts.expired) {
     refreshThreads();
   }
@@ -961,6 +1080,7 @@ async function init() {
   for (const tab of TABS) {
     $("tab-" + tab).addEventListener("click", () => showTab(tab));
   }
+  $("detail-back").addEventListener("click", goBackFromDetail);
   $("stream-more").addEventListener("click", () => {
     mobileStreamRows += MOBILE_STREAM_STEP;
     paintStream();
@@ -968,8 +1088,16 @@ async function init() {
   showTab(state.activeTab); // one panel active from the first frame
   MOBILE_QUERY.addEventListener("change", () => {
     // crossing the 720px line: restore the one-visible-panel invariant
-    // and reapply (or lift) the mobile stream cap
-    if (isMobile()) showTab(state.activeTab);
+    // and reapply (or lift) the mobile stream cap; an open detail
+    // stays the visible panel, whichever side of the line it lands on
+    if (isMobile()) {
+      if (state.detailId !== null) {
+        for (const tab of TABS) $(tab + "-panel").classList.remove("active");
+        $("detail-panel").classList.add("active");
+      } else {
+        showTab(state.activeTab);
+      }
+    }
     paintStream();
   });
 

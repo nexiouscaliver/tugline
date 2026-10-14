@@ -425,6 +425,11 @@ def _run(event_arg, stdin_text, *, home, env, config_path, out):
         return 0
     session_id = _session_id(normalized, env)
     extra = _adapter_extra(normalized, env)
+    if event == "stop":
+        # the console's session detail shows the last thing this
+        # session said; 600 characters of one-line preview is the
+        # budget (title, body, and priority stay exactly as they were)
+        extra["response_preview"] = payload.one_line_preview(normalized, 600)
 
     config = _load_config(config_path)
     if config is None:
