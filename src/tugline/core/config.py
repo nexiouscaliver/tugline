@@ -29,10 +29,31 @@ replies = true    # reply polling
 approve = false   # approve action buttons; needs the daemon receiver and a reachable external_url
 context_titles = true  # session context in notification titles and bodies ("[claude] project - turn finished")
 console = true    # the tug console command
+wake    = true    # wake idle sessions the moment a bound reply lands
+
+[wake]
+# Wake-on-reply: when a reply bound to a session lands while that
+# session looks idle (its last spooled event is a stop or a session
+# start), the daemon spawns the adapter's driver with the reply body
+# as the prompt, resuming the session at once instead of waiting for
+# the next turn. Off restores the pre-wake behavior exactly.
+adapters = ["claude"]  # adapters with a wake driver (zcode has none)
+dry_run = true         # log and record the exact command without spawning
+timeout_seconds = 1800 # one wake is killed after this many seconds
+max_concurrent = 1     # global cap on wakes running at once
+claude_command = [
+  "/Users/shahil/.local/bin/claude",
+  "--resume",
+  "{session}",
+  "-p",
+  "{body}",
+]
 
 Anything unknown, missing a section header, or typed wrong is a loud
-one-line ConfigError. Python 3.10 ships no tomllib, so a small built-in
-parser covering this file's syntax is the fallback there.
+one-line ConfigError. The [wake] section is optional: a config from
+before the feature keeps loading with the defaults above. Python 3.10
+ships no tomllib, so a small built-in parser covering this file's
+syntax (including single-line arrays of strings) is the fallback there.
 """
 
 from __future__ import annotations
@@ -41,6 +62,7 @@ import os
 from dataclasses import dataclass, field
 
 from tugline.core import paths
+from tugline.core.wake import DEFAULT_CLAUDE_COMMAND
 
 try:
     import tomllib
@@ -97,6 +119,35 @@ approve = false
 context_titles = true
 # The tug console: a loopback web view over this same home.
 console = true
+# Wake idle sessions the moment a reply bound to them lands (see
+# [wake]). Off restores the pre-wake behavior exactly.
+wake = true
+
+[wake]
+# Wake-on-reply. When a reply bound to a session lands while that
+# session looks idle (its last spooled event is a stop or a session
+# start), the daemon spawns the adapter's driver with the reply body
+# as the prompt, resuming the session on the spot.
+# Adapters with a wake driver. zcode has none today: replies to idle
+# zcode sessions are queued for next-boundary injection instead.
+adapters = ["claude"]
+# Safe-live-proof mode: log and record the exact command without
+# spawning anything. Flip to false after checking the wake journal.
+dry_run = true
+# One wake is killed after this many seconds.
+timeout_seconds = 1800
+# Global cap on wakes running at once.
+max_concurrent = 1
+# The claude driver command. {session} and {body} are substituted at
+# dispatch; the flag order below is verified against claude --help
+# (v2.1.299: -r, --resume [value]; -p, --print).
+claude_command = [
+  "/Users/shahil/.local/bin/claude",
+  "--resume",
+  "{session}",
+  "-p",
+  "{body}",
+]
 """
 
 _KNOWN = {
@@ -115,6 +166,16 @@ _KNOWN = {
         "approve": bool,
         "context_titles": bool,
         "console": bool,
+        "wake": bool,
+    },
+    # optional section: absent means the defaults (configs written
+    # before the wake feature keep loading unchanged)
+    "wake": {
+        "adapters": list,
+        "dry_run": bool,
+        "timeout_seconds": (int, float),
+        "max_concurrent": int,
+        "claude_command": list,
     },
 }
 
@@ -134,8 +195,19 @@ _DEFAULTS = {
         "approve": False,
         "context_titles": True,
         "console": True,
+        "wake": True,
+    },
+    "wake": {
+        "adapters": ["claude"],
+        "dry_run": True,
+        "timeout_seconds": 1800,
+        "max_concurrent": 1,
+        "claude_command": DEFAULT_CLAUDE_COMMAND,
     },
 }
+
+# The wake section is optional; sections that must be present.
+_REQUIRED = ("server", "topics", "policy", "toggles")
 
 
 class ConfigError(Exception):
@@ -177,6 +249,27 @@ class TogglesConfig:
     approve: bool
     context_titles: bool = True
     console: bool = True
+    wake: bool = True
+
+
+@dataclass
+class WakeConfig:
+    """Wake-on-reply settings (the optional [wake] section).
+
+    claude_command is an argv template: {session} and {body} are
+    substituted at dispatch time."""
+
+    adapters: list = None
+    dry_run: bool = True
+    timeout_seconds: float = 1800.0
+    max_concurrent: int = 1
+    claude_command: list = None
+
+    def __post_init__(self):
+        if self.adapters is None:
+            self.adapters = ["claude"]
+        if self.claude_command is None:
+            self.claude_command = list(DEFAULT_CLAUDE_COMMAND)
 
 
 @dataclass
@@ -186,6 +279,7 @@ class Config:
     policy: PolicyConfig
     toggles: TogglesConfig
     path: str
+    wake: WakeConfig = field(default_factory=WakeConfig)
 
 
 def _resolve_path(path=None):
@@ -235,8 +329,12 @@ def _mini_toml_loads(text):
     """Parse the subset of TOML this config uses. Fallback for 3.10."""
     data = {}
     section = None
-    for lineno, raw in enumerate(text.splitlines(), start=1):
-        line = raw.strip()
+    lines = text.splitlines()
+    lineno = 0
+    while lineno < len(lines):
+        start = lineno + 1
+        line = lines[lineno].strip()
+        lineno += 1
         if not line or line.startswith("#"):
             continue
         if line.startswith("["):
@@ -244,18 +342,27 @@ def _mini_toml_loads(text):
             name = line[1:end].strip() if end != -1 else ""
             tail = line[end + 1 :].strip() if end != -1 else line[1:]
             if not name or "=" in name or (tail and not tail.startswith("#")):
-                raise ConfigError("config line %d: bad section header" % lineno)
+                raise ConfigError("config line %d: bad section header" % start)
             section = name
             data.setdefault(section, {})
             continue
         if "=" not in line:
-            raise ConfigError("config line %d: cannot parse %r" % (lineno, line))
+            raise ConfigError("config line %d: cannot parse %r" % (start, line))
         key, _, rest = line.partition("=")
         key = key.strip().strip('"')
         if not key:
-            raise ConfigError("config line %d: empty key" % lineno)
-        value = _mini_value(rest.strip(), lineno)
-        data.setdefault(section or "", {})[key] = value
+            raise ConfigError("config line %d: empty key" % start)
+        value = rest.strip()
+        if value.startswith("[") and "]" not in value:
+            # a multiline array: join until the bracket closes
+            while "]" not in value and lineno < len(lines):
+                cont = lines[lineno].strip()
+                lineno += 1
+                if not cont or cont.startswith("#"):
+                    continue
+                value += " " + cont
+        parsed = _mini_value(value, start)
+        data.setdefault(section or "", {})[key] = parsed
     return data
 
 
@@ -264,6 +371,8 @@ def _mini_value(text, lineno):
         raise ConfigError("config line %d: missing value" % lineno)
     if text.startswith('"'):
         return _mini_string(text, lineno)
+    if text.startswith("["):
+        return _mini_array(text, lineno)
     # strip a trailing comment on bare values
     for cut in (" #", "\t#"):
         if cut in text:
@@ -278,6 +387,56 @@ def _mini_value(text, lineno):
         except ValueError:
             pass
     raise ConfigError("config line %d: cannot parse value %r" % (lineno, text))
+
+
+def _mini_array(text, lineno):
+    """A flat array of quoted strings or bare words, single line only.
+
+    Covers exactly what the [wake] section uses (adapters,
+    claude_command). Nested arrays, inline tables, and multiline
+    brackets stay errors: loud and early beats half-parsed."""
+    end = text.find("]")
+    if end == -1:
+        raise ConfigError("config line %d: unterminated array" % lineno)
+    tail = text[end + 1 :].strip()
+    if tail and not tail.startswith("#"):
+        raise ConfigError(
+            "config line %d: trailing junk after array" % lineno
+        )
+    inner = text[1:end].strip()
+    if not inner:
+        raise ConfigError("config line %d: empty array" % lineno)
+    if inner.endswith(","):
+        inner = inner[:-1].strip()  # tolerate a trailing comma
+    items = []
+    for part in inner.split(","):
+        part = part.strip()
+        for cut in (" #", "\t#"):
+            if cut in part:
+                part = part.split(cut, 1)[0].strip()
+        if not part:
+            raise ConfigError(
+                "config line %d: empty array element" % lineno
+            )
+        if part.startswith('"'):
+            items.append(_mini_string(part, lineno))
+        elif part == "true":
+            items.append(True)
+        elif part == "false":
+            items.append(False)
+        else:
+            for cast in (int, float):
+                try:
+                    items.append(cast(part))
+                    break
+                except ValueError:
+                    pass
+            else:
+                raise ConfigError(
+                    "config line %d: cannot parse array value %r"
+                    % (lineno, part)
+                )
+    return items
 
 
 def _mini_string(text, lineno):
@@ -305,7 +464,7 @@ def _mini_string(text, lineno):
 
 
 def _build(data, path):
-    for name in _KNOWN:
+    for name in _REQUIRED:
         if name not in data:
             raise ConfigError("config missing [%s] section: %s" % (name, path))
     for name in data:
@@ -318,6 +477,9 @@ def _build(data, path):
     topics = _section(data, "topics", path)
     policy = _section(data, "policy", path)
     toggles = _section(data, "toggles", path)
+    # [wake] is optional: absent means defaults (pre-wake configs keep
+    # loading), present means every key is still checked
+    wake = _section({"wake": data.get("wake", {})}, "wake", path)
 
     url = _check_type(server, "server", "url", str, path)
     if not (url.startswith("http://") or url.startswith("https://")):
@@ -349,8 +511,30 @@ def _build(data, path):
     idle = _check_type(policy, "policy", "idle_seconds", (int, float), path)
     if isinstance(idle, bool) or idle <= 0:
         raise ConfigError("config [policy] idle_seconds must be a positive number: %s" % path)
-    for key in ("notify", "replies", "approve", "context_titles", "console"):
+    for key in ("notify", "replies", "approve", "context_titles", "console",
+                "wake"):
         _check_type(toggles, "toggles", key, bool, path)
+
+    adapters = _check_wake_strings(wake, "adapters", path)
+    command = _check_wake_strings(wake, "claude_command", path)
+    if not any("{session}" == part for part in command) or not any(
+        "{body}" == part for part in command
+    ):
+        raise ConfigError(
+            "config [wake] claude_command needs a {session} and a {body}"
+            " argv entry: %s" % path
+        )
+    timeout = _check_type(wake, "wake", "timeout_seconds", (int, float), path)
+    if isinstance(timeout, bool) or timeout <= 0:
+        raise ConfigError(
+            "config [wake] timeout_seconds must be a positive number: %s" % path
+        )
+    max_concurrent = _check_type(wake, "wake", "max_concurrent", int, path)
+    if isinstance(max_concurrent, bool) or max_concurrent < 1:
+        raise ConfigError(
+            "config [wake] max_concurrent must be at least 1: %s" % path
+        )
+    dry_run = _check_type(wake, "wake", "dry_run", bool, path)
 
     return Config(
         server=ServerConfig(
@@ -370,9 +554,30 @@ def _build(data, path):
             approve=toggles["approve"],
             context_titles=toggles["context_titles"],
             console=toggles["console"],
+            wake=toggles["wake"],
+        ),
+        wake=WakeConfig(
+            adapters=adapters,
+            dry_run=dry_run,
+            timeout_seconds=float(timeout),
+            max_concurrent=max_concurrent,
+            claude_command=command,
         ),
         path=path,
     )
+
+
+def _check_wake_strings(section, key, path) -> list:
+    """One [wake] list key checked as a non-empty list of strings."""
+    value = section[key]
+    if not isinstance(value, list) or not value or not all(
+        isinstance(item, str) for item in value
+    ):
+        raise ConfigError(
+            "config [wake] %s must be a non-empty list of strings: %s"
+            % (key, path)
+        )
+    return list(value)
 
 
 def _section(data, name, path):

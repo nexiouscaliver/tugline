@@ -17,6 +17,12 @@ Single-threaded loop:
 3. Maintain session state from UserPromptSubmit and Stop records in
    the spool (see tugline.core.policy for the file formats). Consuming
    a Stop clears that session's armed marker.
+4. Run one wake dispatcher pass (tugline.core.wake): replies bound to
+   a session that landed while that session looks idle wake it at
+   once through the adapter's driver, instead of waiting for the next
+   turn boundary. Disabled with toggles.wake = false; dry-run by
+   default. In-flight wakes outlive a daemon restart on purpose: they
+   are sessions doing work, not daemon state.
 
 Rate posture: ntfy's default visitor limits are a burst of 60 requests
 replenishing one token every 5 seconds, so the daemon makes at most
@@ -59,6 +65,7 @@ from datetime import datetime, timezone
 
 from tugline.core import policy, spool, topics
 from tugline.core.publisher import Publisher
+from tugline.core.wake import WakeDispatcher
 
 DEFAULT_SPOOL_ROOT = os.path.join("~", ".tugline", "spool")
 DEFAULT_REPLIES_PATH = os.path.join("~", ".tugline", "replies.jsonl")
@@ -83,6 +90,7 @@ class Daemon:
         max_attempts=5,
         now=time.monotonic,
         log=None,
+        wake=None,
     ):
         self.config = config
         self.spool_root = os.path.expanduser(spool_root or DEFAULT_SPOOL_ROOT)
@@ -108,6 +116,23 @@ class Daemon:
         self.stream_status = None
         self._next_reply_request_at = None
         self._receiver = None
+        # wake-on-reply dispatcher: injected for tests, built from the
+        # config when the toggle is on, absent when it is off (exact
+        # pre-wake behavior). The store it probes lives next to the
+        # replies journal under the same tugline home.
+        if wake is not None:
+            self._wake = wake
+        elif getattr(config.toggles, "wake", False):
+            home = os.path.dirname(self.replies_path)
+            self._wake = WakeDispatcher(
+                config,
+                replies_path=self.replies_path,
+                state_root=self.state_root,
+                store_path=os.path.join(home, "store", "tugline.db"),
+                log=self.log,
+            )
+        else:
+            self._wake = None
 
     def log(self, line):
         self._log_fn(line)
@@ -432,8 +457,21 @@ class Daemon:
     # -- cycle and serve loop --
 
     def run_once(self):
-        """One daemon cycle: flush the spool, then poll replies once."""
-        return {"handled": self.flush(), "replies": self.poll_replies()}
+        """One daemon cycle: flush the spool, poll replies once, then
+        run one wake dispatcher pass."""
+        return {
+            "handled": self.flush(),
+            "replies": self.poll_replies(),
+            "wakes": self._wake_poll(),
+        }
+
+    def _wake_poll(self):
+        """One bounded wake dispatcher pass; 0 when disabled. The
+        dispatcher itself never raises (its own guard logs one line),
+        and a missing dispatcher is exactly the toggle-off state."""
+        if self._wake is None:
+            return 0
+        return self._wake.poll()
 
     def _pace_reply_request(self):
         """Keep at least poll_floor seconds between reply requests.
@@ -485,6 +523,7 @@ class Daemon:
         try:
             while not self._stop:
                 self.flush()
+                self._wake_poll()
                 if self._stop:
                     break
                 if self.config.toggles.replies:

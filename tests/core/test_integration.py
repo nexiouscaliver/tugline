@@ -90,9 +90,10 @@ def test_end_to_end_three_records_delivered_and_replies_captured(tmp_path):
         assert entries[0]["body"] == "approved, continue"
         assert entries[0]["title"] == "phone"
 
-        # a second cycle is a no-op: nothing new to do
+        # a second cycle is a no-op: nothing new to do (wakes counts
+        # the wake dispatcher pass, added with wake-on-reply)
         again = daemon.run_once()
-        assert again == {"handled": 0, "replies": 0}
+        assert again == {"handled": 0, "replies": 0, "wakes": 0}
         assert len(server.posts()) == 2
     finally:
         server.shutdown()
