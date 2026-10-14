@@ -136,6 +136,7 @@ class ConsoleServer:
         self.spool_root = os.path.join(self.home, "spool")
         self.approvals_root = os.path.join(self.home, "state", "approvals")
         self.replies_path = os.path.join(self.home, "replies.jsonl")
+        self.wake_journal_path = os.path.join(self.home, "state", "wake.jsonl")
         requested = port if port is not None else getattr(
             self.config.server, "console_port", DEFAULT_PORT
         )
@@ -316,7 +317,7 @@ class ConsoleServer:
             limit = _int_param(query, "limit", 50)
             if limit is None:
                 return 400, {"error": "limit must be an integer"}
-            return 200, {"replies": self.store.replies(limit=limit)}
+            return 200, {"replies": self._replies_view(limit)}
         return 404, {"error": "unknown endpoint"}
 
     def _post(self, name, segments, query, body):
@@ -519,6 +520,11 @@ class ConsoleServer:
             "body": str(row.get("body") or ""),
             "consumed": False,
             "source": "console",
+            # the session binding: the wake dispatcher only considers
+            # journal entries that carry it (free-form phone replies
+            # stay on the injection path), and it is the link the wake
+            # journal records back to this row
+            "session_id": str(row.get("session_id") or ""),
         }
         line = _fit_line(entry)
         directory = os.path.dirname(self.replies_path)
@@ -527,6 +533,20 @@ class ConsoleServer:
         with open(self.replies_path, "a", encoding="utf-8") as fh:
             fh.write(line)
             fh.flush()
+
+    def _replies_view(self, limit):
+        """Store reply rows with their wake state attached.
+
+        The daemon's wake dispatcher journals every decision to
+        <home>/state/wake.jsonl keyed by the reply's (session_id, ts);
+        the latest event per reply wins. No journal, or no entry for a
+        reply, means wake: None (the honest "no wake state" reading,
+        which is also the entire history before the feature)."""
+        rows = self.store.replies(limit=limit)
+        states = _wake_states(self.wake_journal_path)
+        for row in rows:
+            row["wake"] = states.get((row.get("session_id"), row.get("ts")))
+        return rows
 
     # -- SSE --
 
@@ -583,6 +603,42 @@ def _int_param(query, key, default):
         return int(str(values[0]).strip())
     except ValueError:
         return None
+
+
+def _wake_states(journal_path):
+    """Latest wake state per (session_id, reply ts) from the journal.
+
+    A bounded tail keeps this read cheap; corrupt lines are skipped.
+    The states mirror the dispatcher's journal events: dispatched,
+    finished, timed_out, unsupported, skipped."""
+    try:
+        size = os.path.getsize(journal_path)
+        with open(journal_path, encoding="utf-8") as fh:
+            if size > 262144:
+                fh.seek(size - 262144)
+                fh.readline()  # drop the possibly partial line
+            text = fh.read()
+    except OSError:
+        return {}
+    states = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(entry, dict):
+            continue
+        key = (str(entry.get("session_id") or ""), str(entry.get("reply_ts") or ""))
+        if not key[0] or not key[1]:
+            continue
+        states[key] = {
+            "state": str(entry.get("event") or ""),
+            "ts": str(entry.get("ts") or ""),
+        }
+    return states
 
 
 def _fit_line(entry):
