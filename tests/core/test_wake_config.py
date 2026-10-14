@@ -57,6 +57,16 @@ claude_command = [
   "-p",
   "{body}",
 ]
+zcode_command = [
+  "/opt/node",
+  "/opt/zcode.cjs",
+  "--resume",
+  "{session}",
+  "-p",
+  "{body}",
+  "--cwd",
+  "{cwd}",
+]
 """
 
 OLD_CONFIG = """\
@@ -86,7 +96,7 @@ def test_wake_defaults_on_fresh_config(home):
     conf = cfg.load_config()
     assert conf.toggles.wake is True
     wake = conf.wake
-    assert wake.adapters == ["claude"]
+    assert wake.adapters == ["claude", "zcode"]
     assert wake.dry_run is True
     assert wake.timeout_seconds == 1800.0
     assert wake.max_concurrent == 1
@@ -97,6 +107,16 @@ def test_wake_defaults_on_fresh_config(home):
         "-p",
         "{body}",
     ]
+    assert wake.zcode_command == [
+        "node",
+        "/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs",
+        "--resume",
+        "{session}",
+        "-p",
+        "{body}",
+        "--cwd",
+        "{cwd}",
+    ]
 
 
 def test_config_without_wake_section_uses_defaults(home, tmp_path):
@@ -104,7 +124,7 @@ def test_config_without_wake_section_uses_defaults(home, tmp_path):
     write_config(tmp_path / "config.toml", OLD_CONFIG)
     conf = cfg.load_config(tmp_path / "config.toml")
     assert conf.wake.dry_run is True
-    assert conf.wake.adapters == ["claude"]
+    assert conf.wake.adapters == ["claude", "zcode"]
     assert conf.toggles.wake is True
 
 
@@ -130,6 +150,10 @@ def test_wake_section_values_parse(home, tmp_path):
     assert conf.wake.claude_command == [
         "/opt/claude", "--resume", "{session}", "-p", "{body}",
     ]
+    assert conf.wake.zcode_command == [
+        "/opt/node", "/opt/zcode.cjs", "--resume", "{session}",
+        "-p", "{body}", "--cwd", "{cwd}",
+    ]
 
 
 def test_wake_unknown_key_is_rejected(home, tmp_path):
@@ -150,6 +174,28 @@ def test_claude_command_must_be_a_list_of_strings(home, tmp_path):
     text = WAKE_SECTION.replace("dry_run = false", 'claude_command = 7')
     # drop the original multi-line array
     text = text.split("claude_command = [", 1)[0]
+    write_config(tmp_path / "config.toml", text)
+    with pytest.raises(cfg.ConfigError):
+        cfg.load_config(tmp_path / "config.toml")
+
+
+def test_zcode_command_needs_both_placeholders(home, tmp_path):
+    # {cwd} is optional (the Popen cwd still applies), but {session}
+    # and {body} are not: a template missing either cannot resume.
+    # The two-line replace targets the {body} inside zcode_command
+    # (its neighbor flag is --cwd; claude's closes the array).
+    text = WAKE_SECTION.replace(
+        '"{body}",\n  "--cwd",', '"body",\n  "--cwd",'
+    )
+    write_config(tmp_path / "config.toml", text)
+    with pytest.raises(cfg.ConfigError):
+        cfg.load_config(tmp_path / "config.toml")
+
+
+def test_zcode_command_must_be_a_list_of_strings(home, tmp_path):
+    text = WAKE_SECTION.replace("dry_run = false", 'zcode_command = 7')
+    # drop the original multi-line array
+    text = text.split("zcode_command = [", 1)[0]
     write_config(tmp_path / "config.toml", text)
     with pytest.raises(cfg.ConfigError):
         cfg.load_config(tmp_path / "config.toml")
@@ -193,6 +239,10 @@ def test_mini_parser_reads_wake_string_arrays():
     assert parsed["wake"]["adapters"] == ["claude", "zcode"]
     assert parsed["wake"]["claude_command"] == [
         "/opt/claude", "--resume", "{session}", "-p", "{body}",
+    ]
+    assert parsed["wake"]["zcode_command"] == [
+        "/opt/node", "/opt/zcode.cjs", "--resume", "{session}",
+        "-p", "{body}", "--cwd", "{cwd}",
     ]
     assert parsed["wake"]["dry_run"] is False
     assert parsed["toggles"]["wake"] is False
