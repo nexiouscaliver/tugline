@@ -52,12 +52,12 @@ def thread_for(store, nonce):
 # -- schema --
 
 
-def test_schema_version_four_and_tables_created(tmp_path):
+def test_schema_version_five_and_tables_created(tmp_path):
     store = open_store(tmp_path)
     version = store.conn.execute(
         "SELECT value FROM meta WHERE key = 'schema_version'"
     ).fetchone()[0]
-    assert version == "4"
+    assert version == "5"
     names = {
         row[0]
         for row in store.conn.execute(
@@ -90,7 +90,7 @@ def test_version_one_store_migrates_events_columns(tmp_path):
     version = store.conn.execute(
         "SELECT value FROM meta WHERE key = 'schema_version'"
     ).fetchone()[0]
-    assert version == "4"
+    assert version == "5"
     event_cols = {
         row[1] for row in store.conn.execute("PRAGMA table_info(events)")
     }

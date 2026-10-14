@@ -4,7 +4,7 @@ Labels (schema v3) give a session one operator name. Tags give it
 many, set by the operator OR by the agent itself, which is what makes
 reply targeting by name practical: the operator can aim a reply at
 "the session tagged build-night" without ever copying a raw session
-id. These tests pin the schema v4 tags table, the normalization rules
+id. These tests pin the schema v4 tags table (v5 with W9-L21), the normalization rules
 ([a-z0-9-], trimmed, lowercase, max 24 chars, max 8 per session), the
 in-place migration from a v3 store, and the resolution order the
 reply endpoint builds on: exact session id, then unique label, then
@@ -84,12 +84,12 @@ def test_tag_limits_are_exported():
 # -- schema v4 --
 
 
-def test_fresh_store_is_schema_version_four_with_tags_table(tmp_path):
+def test_fresh_store_is_schema_version_five_with_tags_table(tmp_path):
     store = open_store(tmp_path)
     version = store.conn.execute(
         "SELECT value FROM meta WHERE key = 'schema_version'"
     ).fetchone()[0]
-    assert version == "4"
+    assert version == "5"
     names = {
         row[0]
         for row in store.conn.execute(
@@ -146,7 +146,7 @@ def test_version_three_store_migrates_tags_in_place(tmp_path):
     version = store.conn.execute(
         "SELECT value FROM meta WHERE key = 'schema_version'"
     ).fetchone()[0]
-    assert version == "4"
+    assert version == "5"
     # every v3 fact rides over untouched
     row = store.sessions()[0]
     assert row["session_id"] == "controller"
