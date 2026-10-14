@@ -9,6 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Session detail page in the console: tapping a session card (phone)
+  or table row (desktop) opens a full detail view with everything
+  about the session. Store schema v5 adds
+  `events.response_preview` (empty string on every existing row);
+  both adapters' stop records now carry a 600-character one-line
+  preview of the turn's last assistant message as record enrichment
+  (titles, bodies, and priorities unchanged), and
+  `Store.session_detail(session_id)` reads back the session row with
+  tags, the newest userpromptsubmit body as `last_prompt`, the newest
+  non-empty stop preview as `last_response`, and the newest 100
+  events. `GET /api/sessions/<id>` serves it under the same token
+  gate as every other read, with the session row decorated exactly
+  like the sessions list. The web UI detail page shows a header line
+  (label or id, display id, state chip, adapter and project badges),
+  a meta grid (first seen, last seen, cwd, tags), big-target actions
+  (reply to this session, rename, add/remove tags), the last prompt,
+  the last response preview, and the session's events with delivery
+  chips; it refreshes on every delta and a `< back` button (44px)
+  returns to the previous tab/panel state. The fiddly inline
+  rename/tag controls are gone from the session cards (mobile cards
+  keep name/id, state, adapter, time, and last event text only);
+  every control now lives on the detail page with 44px targets.
+
 - Wake-on-reply: a reply bound to a session that lands while the
   session looks idle (its last spooled event a stop or a session
   start) wakes it at once instead of waiting for the next turn

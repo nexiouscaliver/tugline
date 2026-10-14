@@ -146,6 +146,11 @@ main {
   #asks-panel { grid-area: asks; }
   #reply-panel { grid-area: reply; }
   #stream-panel { grid-area: stream; }
+  /* the detail page takes the sessions seat when it is open; the
+     table comes back the moment the operator goes back */
+  #detail-panel { display: none; }
+  body.detail-open #detail-panel { display: block; grid-area: sessions; }
+  body.detail-open #sessions-panel { display: none; }
 }
 
 /* phones restructure everything in the block at the bottom of this
@@ -249,6 +254,11 @@ tbody tr:last-child td { border-bottom: none; }
 
 tr.selected td { background: rgba(88, 166, 255, 0.09); }
 
+/* every row opens the detail page now, phones and desktop alike */
+#sessions-table tbody tr { cursor: pointer; }
+
+#sessions-table tbody tr:hover td { background: rgba(88, 166, 255, 0.05); }
+
 .idlink {
   font-family: var(--mono);
   font-size: 0.9rem;
@@ -267,8 +277,8 @@ tr.selected td { background: rgba(88, 166, 255, 0.09); }
 tr.selected .idlink { color: var(--accent); }
 
 /* session identity: the operator label is the primary name, the
-   collision-proof short id sits beneath it, and the rename link
-   opens an inline editor in the same cell */
+   collision-proof short id sits beneath it; cards carry no controls,
+   every control lives on the detail page */
 .idwrap {
   display: flex;
   flex-direction: column;
@@ -294,19 +304,12 @@ tr.selected .idlink { color: var(--accent); }
   text-overflow: ellipsis;
 }
 
-.idwrap .rename {
-  font-size: 0.75rem;
-  color: var(--muted);
-}
-
-/* tags: small chips under the session name, each with a remove x,
-   plus the linkish tag affordance that opens the inline add editor */
+/* tags: chips with a remove x, on the session detail page */
 .tagline {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: 0.2rem;
-  max-width: 16rem;
 }
 
 .tagchip {
@@ -343,36 +346,6 @@ tr.selected .idlink { color: var(--accent); }
   color: var(--red);
 }
 
-.idwrap .tagadd {
-  font-size: 0.75rem;
-  color: var(--muted);
-}
-
-.idwrap .tagadd:hover { color: var(--accent); }
-
-.tag-input {
-  max-width: 9rem;
-}
-
-.taghint {
-  font-size: 0.7rem;
-  color: var(--muted);
-}
-
-.idwrap .rename:hover { color: var(--accent); }
-
-.rename-input {
-  width: 14rem;
-  max-width: 100%;
-  background: var(--bg);
-  border: 1px solid var(--accent);
-  border-radius: 2px;
-  color: var(--text);
-  font-family: var(--mono);
-  font-size: 0.85rem;
-  padding: 0.25rem 0.4rem;
-}
-
 .cell-badge { font-family: var(--mono); min-width: 6ch; color: var(--muted); }
 
 .cell-project,
@@ -400,6 +373,163 @@ tr.selected .idlink { color: var(--accent); }
 
 #sessions-table.no-project .col-project,
 #sessions-table.no-project td.cell-project { display: none; }
+
+/* -- session detail page -- */
+
+.detail-back {
+  display: block;
+  font-family: var(--mono);
+  font-size: 0.9rem;
+  min-height: 44px;
+  min-width: 44px;
+  padding: 0.25rem 0.8rem;
+  margin: 0 0 0.7rem;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 2px;
+  color: var(--text);
+  cursor: pointer;
+}
+
+.detail-back:hover { color: var(--accent); border-color: var(--accent); }
+
+.detail-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.4rem 0.8rem;
+  margin-bottom: 0.6rem;
+}
+
+.detail-nameblock { min-width: 0; }
+
+.detail-title {
+  font-size: 1.1rem;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.detail-idmono {
+  font-family: var(--mono);
+  font-size: 0.78rem;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.detail-badges {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.3rem;
+}
+
+.detail-meta {
+  display: grid;
+  grid-template-columns: minmax(7rem, auto) minmax(0, 1fr);
+  gap: 0.2rem 0.8rem;
+  margin: 0 0 0.7rem;
+  font-size: 0.9rem;
+}
+
+.detail-meta dt {
+  color: var(--muted);
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  padding-top: 0.15rem;
+  white-space: nowrap;
+}
+
+.detail-meta dd {
+  margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.mono-time,
+.mono-wrap { font-family: var(--mono); }
+
+.muted { color: var(--muted); }
+
+.detail-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin-bottom: 0.4rem;
+}
+
+.btn-primary { color: var(--accent); border-color: rgba(88, 166, 255, 0.5); }
+
+.btn-primary:hover:not(:disabled) { background: rgba(88, 166, 255, 0.12); }
+
+.detail-replybtn {
+  min-height: 44px;
+  min-width: 44px;
+  padding: 0.4rem 0.8rem;
+  font-size: 0.95rem;
+}
+
+.detail-control {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.ctl-label {
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.detail-input {
+  flex: 1 1 9rem;
+  min-width: 0;
+  min-height: 44px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 2px;
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 0.9rem;
+  padding: 0.25rem 0.5rem;
+}
+
+.detail-input:focus { border-color: var(--accent); outline: none; }
+
+.detail-control .btn { min-height: 44px; min-width: 44px; }
+
+/* tag chips on the detail page: the x keeps the 44px floor */
+.detail-tagline { max-width: none; }
+
+.detail-tagline .tagchip { font-size: 0.8rem; }
+
+.detail-tagline .tagx { min-width: 44px; min-height: 44px; font-size: 0.85rem; }
+
+.detail-block { margin-top: 0.8rem; }
+
+.detail-block h3 { font-family: var(--mono); }
+
+.detail-text {
+  margin: 0;
+  font-family: var(--mono);
+  font-size: 0.9rem;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* the events list reuses the stream row anatomy, full text everywhere
+   (the heavier selector beats the base .stream .tx ellipsis rule) */
+.stream.detail-events .tx,
+.stream.detail-events .tx-extra {
+  white-space: normal;
+  overflow: visible;
+}
 
 /* -- live stream -- */
 
@@ -721,7 +851,6 @@ textarea:disabled { opacity: 0.45; }
   #sessions-table td.cell-state { order: 0; }
   #sessions-table td.cell-id { order: 1; }
   #sessions-table td.cell-badge { order: 2; max-width: none; overflow: visible; }
-  #sessions-table td.cell-project { order: 3; max-width: none; overflow: visible; }
   #sessions-table td.cell-time { order: 4; margin-left: auto; }
   #sessions-table td.cell-event { order: 5; flex-basis: 100%; max-width: none; overflow: visible; }
   .cell-event .evbody { display: block; margin-top: 0.1rem; color: var(--muted); font-family: var(--sans); }
@@ -729,9 +858,9 @@ textarea:disabled { opacity: 0.45; }
      text with no ellipsis, like every other card line */
   .idwrap .idlink.session-name,
   .idwrap .idsub { max-width: none; overflow: visible; }
-  /* the rename link rides inside the name block: small text, but the
-     tap target keeps the 44px floor and the link stays keyboard-reachable */
-  .idwrap .rename { min-height: 44px; display: flex; align-items: center; }
+  /* cards carry no controls and no project line: the detail page owns
+     both; the card is name/id, state, adapter, time, last event */
+  #sessions-table td.cell-project { display: none; }
 
   /* stream: time, event, id and the delivery chip hold line one; the
      full title and body wrap below */
@@ -774,8 +903,11 @@ textarea:disabled { opacity: 0.45; }
 
   /* reply: the send button is a full-width 44px target; recent
      replies wrap. Form controls use 16px text because iOS zooms the
-     viewport on focus otherwise; prose keeps the 15px base */
-  textarea, .tokenbar input, .rename-input { font-size: 16px; }
+     viewport on focus otherwise; prose keeps the 15px base. The
+     detail page follows the same rule for its inputs, and its reply
+     button is a full-width 44px target too */
+  textarea, .tokenbar input, .detail-input { font-size: 16px; }
   #reply-send { flex: 1; min-height: 44px; font-size: 0.95rem; }
+  .detail-replybtn { width: 100%; }
   .recent .tx { white-space: normal; overflow: visible; }
 }
