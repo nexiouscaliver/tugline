@@ -31,6 +31,22 @@ they happened.
   set their own from the CLI (see Naming sessions from a shell
   below), so a session can hang its name on itself the moment it
   starts.
+- Auto-identity: sessions name themselves with zero operator work.
+  The first prompt record auto-labels a session (the first 5-7 words
+  of the prompt, ASCII, at most 40 characters), and the moment the
+  store first sees a session it auto-tags it with its adapter and
+  its project label. Auto-labeling happens once and never
+  overwrites: an operator label always wins, and clearing the label
+  pauses auto-labeling just as much as setting one. Auto-tags land
+  only at first sighting, so removing one is permanent.
+- One display rule, everywhere: the label when set, else a
+  collision-proof unique suffix of the session id (lengthened until
+  no other session ends with it). The leading `sess_...` characters
+  are never a display id. The store exports the rule as
+  `tugline.core.store.session_display_id` and attaches the result to
+  every session row (`display_id`) and every event row
+  (`label`, `tags`, `display_id`), so each stream row answers who
+  did what where on its own.
 - Session state is derived from recency, not just the last event:
   active now (green) when the session was seen within five minutes;
   running (green) while it keeps producing events inside a thirty
@@ -53,7 +69,11 @@ they happened.
   reply link, plus an answered and expired list underneath. The
   buttons write the same decision files the approve receiver reads,
   so a press on the page and a press on a phone notification have the
-  same effect.
+  same effect. Multiple choice asks (`tug ask`) appear in the same
+  thread list with `kind: "ask"`: their rows carry the lettered
+  `options` as parsed JSON plus the `status`/`answer` state, so the
+  page can render the question with tappable choices (see Asking
+  questions below).
 - Reply: a text box with an explicit target line: reply to session
   <name> (label first, short id second, so you always see exactly
   where it goes), reply via thread <id>, or no target selected. Pick
@@ -139,8 +159,8 @@ Security below).
 | GET `/` | the console page |
 | GET `/api/state` | one render in one read: sessions (decorated with `display_state` and a collision-proof `display_id`, active-now first, each with its `tags`), the last 50 events, threads, the last 20 replies, headline counts, health, spool depth, last ingest time |
 | GET `/api/sessions` | all sessions with the same decoration, `tags`, and ordering as `/api/state` |
-| GET `/api/events?limit=50&session=<id>` | events newest first, optionally scoped to one session; a non-integer limit is a 400 |
-| GET `/api/threads?status=open` | approval threads, newest first, optionally one status |
+| GET `/api/events?limit=50&session=<id>` | events newest first, optionally scoped to one session; every row also carries its session's `label`, `tags`, and `display_id` (the one display rule: label else unique suffix), so a stream row answers who did what where on its own; a non-integer limit is a 400 |
+| GET `/api/threads?status=open` | threads newest first, optionally one status; ask rows (`kind: "ask"`) come with their lettered `options` parsed from JSON plus the `status`/`answer` state, approve rows carry `options: null` |
 | GET `/api/replies?limit=50` | replies, newest first, each row decorated with its `wake` state (`{state, ts}` from the wake dispatcher journal, or null when no decision was recorded); a non-integer limit is a 400 |
 | GET `/api/events/stream` | server-sent events: one `snapshot` on connect, then a `delta` after each ingest pass (about every 2 seconds), a `: ping` keepalive when 15 seconds pass with nothing to send |
 | POST `/api/replies` | body must be a JSON object with a string `body` and exactly one target, `thread_nonce` or `session_id`, or 400; the `session_id` value is resolved as an exact session id first, then a label exactly one session carries, then a tag exactly one session carries; an ambiguous label or tag is a 400 whose `sessions` key lists every matching session id, an unknown name a 404, an unknown thread nonce a 404; records the reply against the resolved session and appends the replies.jsonl line |
@@ -207,6 +227,61 @@ config-driven command template (`wake.claude_command`,
 stays unconsumed until the session's own next-boundary injection
 picks it up.
 
+## Asking questions
+
+`tug ask` is the multiple choice ask primitive: an agent poses one
+question with lettered options, you answer from wherever you are,
+and the command prints your choice to its stdout and exits 0.
+
+```
+tug ask --session <id> \
+        --option "A: ship the release" \
+        --option "B: roll back and investigate" \
+        --timeout 300 \
+        "which deploy path?"
+```
+
+- Options are lettered choices, 2 to 8 of them. An explicit letter
+  prefix wins (`"A: ship"`), bare options are lettered automatically
+  (`A`, `B`, `C`, ...). The timeout defaults to 300 seconds and tops
+  out at 1800.
+- The ask lands in the store as a thread with `kind: "ask"` and the
+  options as JSON, then pushes one HIGH priority notification titled
+  `[<harness>] <project> - asks: <question>` (the same enriched
+  title helpers every other notification uses) whose body lists the
+  lettered options and the reply guidance.
+- The command then blocks, polling for an answer. On an answer it
+  prints `key: text` (for example `B: roll back and investigate`)
+  and exits 0. On timeout it prints `no answer`, exits 1, and the
+  thread is marked `expired`. Nothing in the flow ever tracebacks:
+- Answers, in the order they are checked each poll:
+  1. a console option tap or a reply bound to the thread nonce, or a
+     reply aimed at the session by id, label, or tag (the same
+     id > label > tag targeting the reply box uses);
+  2. a reply journal line (an ntfy reply) whose body is exactly one
+     option key and whose thread/session binding resolves to this
+     ask thread: a binding is required, so a bare free-form ntfy
+     reply never answers an ask, and a session-bound reply lands on
+     the session's newest open ask so two concurrent asks never
+     steal each other's answers;
+  3. `tug answer --thread <nonce> <key>` from another terminal
+     (the agent or you).
+- A reply whose body is not exactly one option key (`"Z"`, `"A:
+  ship it please"`) is rejected: the ask stays open and keeps
+  waiting. Answering with a key the ask does not carry is a clean
+  error, never a wrong answer.
+
+The console contract (for the page): threads with `kind: "ask"`
+render with their `options` array (`[{key, text}, ...]`) and their
+answer state (`status` open/answered/expired, `answer` the chosen
+key). A tap or a reply sent through the normal reply endpoints with
+the thread nonce (or the session as the target, body just the
+letter) answers the ask. Session rows and event rows carry
+`label`, `tags`, and `display_id`; the display id is the one rule
+(label else collision-proof suffix) exported as
+`tugline.core.store.session_display_id`, and templates should render
+exactly that.
+
 ## Naming sessions from a shell
 
 Labels and tags are not console-only: the `tug` CLI writes the same
@@ -232,6 +307,12 @@ exits 2 with a note that sessions come from spooled hook events; tags
 follow the same normalization and limits as the API (lowercase
 [a-z0-9-], at most 24 characters, at most 8 per session, invalid
 characters dropped).
+
+Naming is also automatic: the store itself auto-labels a session from
+its first prompt (first 5-7 words, once, operator labels always win
+and pause the behavior) and auto-tags it with its adapter and project
+at first sight. The commands above are for renaming and refinement on
+top of that, not a prerequisite for a session to be recognizable.
 
 Name-based reply targeting works from curl too, exactly as the reply
 box does it: pass the label or tag as `session_id` in the POST body
