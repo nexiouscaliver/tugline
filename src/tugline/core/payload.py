@@ -17,6 +17,7 @@ Rules, kept deliberately small:
 Pure functions only, no IO.
 """
 
+import re
 from collections.abc import Mapping
 
 # canonical name -> (snake_case spelling, camelCase spelling)
@@ -120,3 +121,20 @@ def one_line_preview(normalized, limit=80) -> str:
     if not text:
         text = normalized.get("response_preview")
     return " ".join(str(text or "").split())[:limit]
+
+
+def multiline_preview(normalized, limit=600) -> str:
+    """Newline-keeping turn preview from the payload, capped at limit.
+
+    The console renders this field as markdown, so code blocks and
+    lists must survive: the raw text keeps its newlines (carriage
+    returns fold to line feeds), runs of three or more newlines
+    collapse to two, the ends are trimmed, and only then is the result
+    capped at limit characters. Same field preference as
+    one_line_preview; empty when neither field carries anything.
+    """
+    text = normalized.get("last_assistant_message")
+    if not text:
+        text = normalized.get("response_preview")
+    text = str(text or "").replace("\r\n", "\n").replace("\r", "\n")
+    return re.sub(r"\n{3,}", "\n\n", text[:limit]).strip()

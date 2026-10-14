@@ -189,6 +189,54 @@ def test_stop_preview_truncates_at_600_characters(home, config_path):
     assert rec["response_preview"] == "y" * 600
 
 
+def test_stop_preview_keeps_newlines_from_a_multiline_message(
+    home, config_path
+):
+    message = "ran the suite:\n\n\n\n- 2 failed\n- 5 passed\n\nsee the log"
+    code = run_hook(
+        "Stop",
+        json.dumps(
+            {
+                "hook_event_name": "Stop",
+                "session_id": "s-ml",
+                "last_assistant_message": message,
+            }
+        ),
+        config_path=config_path,
+        home=home,
+    )
+    assert code == 0
+    rec = spool_records(home)[0]
+    # code blocks and lists survive; only the 3+ newline run collapses
+    assert rec["response_preview"] == (
+        "ran the suite:\n\n- 2 failed\n- 5 passed\n\nsee the log"
+    )
+
+
+def test_stop_preview_caps_at_600_on_a_multiline_message(home, config_path):
+    head = "## done\n\n\n\n- fixed the flush bug\n- added tests\n"
+    code = run_hook(
+        "Stop",
+        json.dumps(
+            {
+                "hook_event_name": "Stop",
+                "session_id": "s-ml-long",
+                "last_assistant_message": head + "y" * 700,
+            }
+        ),
+        config_path=config_path,
+        home=home,
+    )
+    assert code == 0
+    rec = spool_records(home)[0]
+    # the cap lands on the raw text (head is 47 characters, so 553 y
+    # characters survive), then the newline run collapses, then trim
+    assert rec["response_preview"] == (
+        "## done\n\n- fixed the flush bug\n- added tests\n" + "y" * 553
+    )
+    assert len(rec["response_preview"]) == 598
+
+
 def test_stop_without_a_message_carries_empty_preview(home, config_path):
     code = run_hook(
         "Stop",

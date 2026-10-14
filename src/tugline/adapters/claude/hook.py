@@ -441,10 +441,12 @@ def _run(event_name, stdin) -> int:
                 session
             )
         # the console's session detail shows the last thing this
-        # session said; 600 characters of one-line preview is the
-        # budget (title, body, and priority stay exactly as they were)
+        # session said and renders it as markdown, so the preview keeps
+        # newlines (code blocks and lists must survive) inside a 600
+        # character budget (title, body, and priority stay exactly as
+        # they were)
         extra = dict(extra)
-        extra["response_preview"] = payload_module.one_line_preview(
+        extra["response_preview"] = payload_module.multiline_preview(
             normalized, 600
         )
         spool.append(

@@ -374,6 +374,72 @@ tr.selected .idlink { color: var(--accent); }
 #sessions-table.no-project .col-project,
 #sessions-table.no-project td.cell-project { display: none; }
 
+/* -- sessions filter bar: inline at the top of the panel, never an
+   overlay; the chip row scrolls on one line so it never grows -- */
+
+.filterbar { margin-bottom: 0.6rem; }
+
+.filter-row {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+#filter-search {
+  flex: 1;
+  min-width: 0;
+  min-height: 36px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 2px;
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 0.9rem;
+  padding: 0.3rem 0.5rem;
+}
+
+#filter-search:focus { border-color: var(--accent); outline: none; }
+
+#filter-clear { min-height: 36px; min-width: 44px; }
+
+.chiprow {
+  display: flex;
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  gap: 0.35rem;
+  margin-top: 0.45rem;
+}
+
+.fchip {
+  flex: 0 0 auto;
+  min-height: 44px;
+  padding: 0.5rem 1rem;
+  font-family: var(--mono);
+  font-size: 0.85rem;
+  line-height: 1;
+  color: var(--muted);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 2px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.fchip:hover { color: var(--text); border-color: var(--gray); }
+
+.fchip.active {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: rgba(88, 166, 255, 0.08);
+}
+
+.filter-count {
+  margin: 0.4rem 0 0;
+  font-family: var(--mono);
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
 /* -- session detail page -- */
 
 .detail-back {
@@ -514,13 +580,93 @@ tr.selected .idlink { color: var(--accent); }
 
 .detail-block h3 { font-family: var(--mono); }
 
-.detail-text {
-  margin: 0;
+/* markdown blocks (last prompt, last response): same base typography
+   the plain text block had, so construct-free text renders exactly as
+   before; the tags below are the only ones the renderer ever emits */
+.md {
   font-family: var(--mono);
   font-size: 0.9rem;
   line-height: 1.45;
-  white-space: pre-wrap;
   overflow-wrap: anywhere;
+  min-width: 0;
+}
+
+.md p {
+  margin: 0;
+  white-space: pre-wrap;
+}
+
+.md > * + * { margin-top: 0.55rem; }
+
+/* code and pre: monospace stack, panel background, 1px border */
+.md code {
+  font-family: var(--mono);
+  font-size: 0.88rem;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 2px;
+  padding: 0.05rem 0.25rem;
+}
+
+.md pre {
+  margin: 0;
+  padding: 0.5rem 0.6rem;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 2px;
+  overflow-x: auto;
+}
+
+.md pre code {
+  padding: 0;
+  border: none;
+  background: none;
+  white-space: pre;
+}
+
+/* headings sit between 0.95 and 1.15rem, nothing louder */
+.md h1,
+.md h2,
+.md h3,
+.md h4 {
+  margin: 0;
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 0.95rem;
+  font-weight: 700;
+  letter-spacing: normal;
+  text-transform: none;
+}
+
+.md h1 { font-size: 1.15rem; }
+.md h2 { font-size: 1.1rem; }
+.md h3 { font-size: 1.05rem; }
+
+/* lists stay tight */
+.md ul,
+.md ol {
+  margin: 0;
+  padding-left: 1.4rem;
+}
+
+.md li { margin: 0.1rem 0; }
+
+/* quotes: 2px muted left border, muted text */
+.md blockquote {
+  margin: 0;
+  padding: 0.05rem 0 0.05rem 0.6rem;
+  border-left: 2px solid var(--muted);
+  color: var(--muted);
+}
+
+.md a { color: var(--accent); }
+
+.md strong { color: var(--text); font-weight: 700; }
+
+.md hr {
+  margin: 0.55rem 0;
+  border: none;
+  border-top: 1px solid var(--border);
 }
 
 /* the events list reuses the stream row anatomy, full text everywhere
@@ -906,7 +1052,7 @@ textarea:disabled { opacity: 0.45; }
      viewport on focus otherwise; prose keeps the 15px base. The
      detail page follows the same rule for its inputs, and its reply
      button is a full-width 44px target too */
-  textarea, .tokenbar input, .detail-input { font-size: 16px; }
+  textarea, .tokenbar input, .detail-input, #filter-search { font-size: 16px; }
   #reply-send { flex: 1; min-height: 44px; font-size: 0.95rem; }
   .detail-replybtn { width: 100%; }
   .recent .tx { white-space: normal; overflow: visible; }
