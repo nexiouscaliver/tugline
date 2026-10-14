@@ -58,6 +58,37 @@ def test_stop_preview_truncates_at_600_characters(
     assert record["response_preview"] == "z" * 600
 
 
+def test_stop_preview_keeps_newlines_from_a_multiline_message(
+    tug_home, hook_payload, spool_records
+):
+    payload = hook_payload(
+        "Stop",
+        last_assistant_message=(
+            "ran the suite:\n\n\n\n- 2 failed\n- 5 passed\n\nsee the log"
+        ),
+    )
+    assert run("Stop", payload) == 0
+    # code blocks and lists survive; only the 3+ newline run collapses
+    assert spool_records()[0]["response_preview"] == (
+        "ran the suite:\n\n- 2 failed\n- 5 passed\n\nsee the log"
+    )
+
+
+def test_stop_preview_caps_at_600_on_a_multiline_message(
+    tug_home, hook_payload, spool_records
+):
+    head = "## done\n\n\n\n- fixed the flush bug\n- added tests\n"
+    payload = hook_payload(
+        "Stop", last_assistant_message=head + "z" * 700
+    )
+    assert run("Stop", payload) == 0
+    # the cap lands on the raw text (head is 47 characters, so 553 z
+    # characters survive), then the newline run collapses, then trim
+    assert spool_records()[0]["response_preview"] == (
+        "## done\n\n- fixed the flush bug\n- added tests\n" + "z" * 553
+    )
+
+
 def test_stop_without_a_message_carries_an_empty_preview(
     tug_home, hook_payload, spool_records
 ):

@@ -13,9 +13,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   or table row (desktop) opens a full detail view with everything
   about the session. Store schema v5 adds
   `events.response_preview` (empty string on every existing row);
-  both adapters' stop records now carry a 600-character one-line
-  preview of the turn's last assistant message as record enrichment
-  (titles, bodies, and priorities unchanged), and
+  both adapters' stop records now carry a 600-character
+  newline-keeping preview of the turn's last assistant message as
+  record enrichment (code blocks and lists survive; titles, bodies,
+  and priorities unchanged), and
   `Store.session_detail(session_id)` reads back the session row with
   tags, the newest userpromptsubmit body as `last_prompt`, the newest
   non-empty stop preview as `last_response`, and the newest 100
