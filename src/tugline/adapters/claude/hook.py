@@ -433,6 +433,13 @@ def _run(event_name, stdin) -> int:
         else:
             title = "claude turn finished"
             body = "session %s turn finished" % session
+        # the console's session detail shows the last thing this
+        # session said; 600 characters of one-line preview is the
+        # budget (title, body, and priority stay exactly as they were)
+        extra = dict(extra)
+        extra["response_preview"] = payload_module.one_line_preview(
+            normalized, 600
+        )
         spool.append(
             paths.spool_root(),
             event="stop",

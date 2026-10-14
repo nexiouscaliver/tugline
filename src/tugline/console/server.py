@@ -304,6 +304,8 @@ class ConsoleServer:
             return 200, self.state_payload()
         if name == "sessions" and len(segments) == 2:
             return 200, {"sessions": self._sessions_view()}
+        if name == "sessions" and len(segments) == 3:
+            return self._get_session_detail(unquote(segments[2]))
         if name == "events" and len(segments) == 2:
             limit = _int_param(query, "limit", 50)
             if limit is None:
@@ -354,6 +356,24 @@ class ConsoleServer:
                 unquote(segments[2]), unquote(segments[4])
             )
         return 404, {"error": "unknown endpoint"}
+
+    def _get_session_detail(self, session_id):
+        """One session and everything about it, for the detail page.
+
+        The session_detail dict from the store with its session row
+        run through the same decoration the sessions list uses
+        (display_state, display_id; the label already rides the row),
+        so the detail and the list never disagree about how a session
+        reads. Unknown ids get the one-line 404. Sits under the same
+        token gate as every other /api route (the gate answers before
+        routing).
+        """
+        try:
+            detail = self.store.session_detail(session_id)
+        except KeyError:
+            return 404, {"error": "unknown session"}
+        detail["session"] = decorate_sessions([detail["session"]])[0]
+        return 200, detail
 
     def _put_session_tag(self, session_id, tag):
         """Attach one tag to one session.

@@ -84,12 +84,12 @@ def test_tag_limits_are_exported():
 # -- schema v4 --
 
 
-def test_fresh_store_is_schema_version_four_with_tags_table(tmp_path):
+def test_fresh_store_is_schema_version_five_with_tags_table(tmp_path):
     store = open_store(tmp_path)
     version = store.conn.execute(
         "SELECT value FROM meta WHERE key = 'schema_version'"
     ).fetchone()[0]
-    assert version == "4"
+    assert version == "5"
     names = {
         row[0]
         for row in store.conn.execute(
@@ -146,7 +146,7 @@ def test_version_three_store_migrates_tags_in_place(tmp_path):
     version = store.conn.execute(
         "SELECT value FROM meta WHERE key = 'schema_version'"
     ).fetchone()[0]
-    assert version == "4"
+    assert version == "5"
     # every v3 fact rides over untouched
     row = store.sessions()[0]
     assert row["session_id"] == "controller"
