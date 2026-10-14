@@ -221,12 +221,15 @@ def test_stream_429_is_an_error_not_a_tight_loop(fake_ntfy, tmp_path, monkeypatc
     assert fake_ntfy.rate_limited == 1
 
 
-# the poll fallback only exists on the error path, floored at 6 seconds
+# the poll fallback only exists on the error path, one request per cycle
 
 
-def test_reply_requests_keep_a_six_second_floor_when_stream_errors(
-    fake_ntfy, tmp_path
-):
+def test_reply_fallback_makes_exactly_one_request_per_cycle(fake_ntfy, tmp_path):
+    """W7-L17: when the stream cannot be established, a cycle spends
+    its single request on either a stream open attempt or the poll
+    fallback, never both. The old cycle burned a stream attempt plus a
+    poll every pass, doubling the request rate on a server that was
+    already rate limiting us."""
     fake_ntfy.fail_gets = 999  # every stream open fails
     daemon = make_daemon(fake_ntfy, tmp_path, poll_floor=6.0)
     clock = FakeClock(500.0)
@@ -243,12 +246,70 @@ def test_reply_requests_keep_a_six_second_floor_when_stream_errors(
     daemon._replies_cycle()
     daemon._replies_cycle()
 
-    assert sleeps == [6.0, 6.0, 6.0, 6.0, 6.0]
-    # each cycle: one failed stream open plus one fallback poll, never
-    # closer than 6 seconds to the previous reply request
+    # three cycles, three reply requests, each a full floor after the
+    # previous one: stream attempt, poll, stream attempt
+    assert sleeps == [6.0, 6.0]
     gets = fake_ntfy.gets()
-    assert len(gets) == 6
-    assert sum(1 for r in gets if "poll=1" in r["path"]) == 3
+    assert len(gets) == 3
+    kinds = ["poll" if "poll=1" in r["path"] else "stream" for r in gets]
+    assert kinds == ["stream", "poll", "stream"]
+    assert fake_ntfy.rate_limited == 0
+
+
+def test_reply_fallback_cadence_stays_under_replenishment(fake_ntfy, tmp_path):
+    """The W7-L17 rate receipt: with the visitor bucket drained and the
+    stream unreachable, ten simulated minutes of the fallback make at
+    most one request per poll_floor seconds (10/min against ntfy's
+    one-token-per-5s replenishment of 12/min), so the bucket refills
+    and requests succeed again instead of piling up 429s."""
+    fake_ntfy.fail_gets = 999
+    daemon = make_daemon(fake_ntfy, tmp_path, poll_floor=6.0)
+    clock = FakeClock(500.0)
+    fake_ntfy.clock = clock
+    fake_ntfy.limiter.clock = clock
+
+    def bump_sleep(seconds):
+        clock.now += seconds
+
+    daemon.sleep = bump_sleep
+    daemon._now = clock
+    fake_ntfy.limiter.tokens = 0.0  # the storm posture: bucket empty
+
+    start = clock.now
+    cycles = 0
+    while clock.now < start + 600:
+        daemon._replies_cycle()
+        cycles += 1
+
+    gets = fake_ntfy.gets()
+    # the first request fires at t=0 and one more every full floor:
+    # 101 requests over 600 simulated seconds, exactly one per cycle
+    assert cycles == 101
+    assert len(gets) == cycles  # exactly one request per cycle
+    per_minute = len(gets) / 10.0
+    assert per_minute <= 10.1 < 12.0  # under the one-per-5s replenishment
+    assert fake_ntfy.rate_limited <= 2  # the bucket refilled and stayed full
+
+
+def test_held_stream_disables_the_poll_fallback(fake_ntfy, tmp_path):
+    """One subscription path at a time: while the stream connects, the
+    poll fallback must not run at all."""
+    daemon = make_daemon(fake_ntfy, tmp_path, poll_floor=6.0)
+    clock = FakeClock(500.0)
+
+    def bump_sleep(seconds):
+        clock.now += seconds
+
+    daemon.sleep = bump_sleep
+    daemon._now = clock
+
+    for _ in range(3):
+        daemon._replies_cycle()
+        clock.now += 6.0
+
+    gets = fake_ntfy.gets()
+    assert len(gets) == 3
+    assert all("poll=1" not in r["path"] for r in gets)
     assert fake_ntfy.rate_limited == 0
 
 

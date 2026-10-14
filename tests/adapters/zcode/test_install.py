@@ -76,12 +76,17 @@ def real_shape(tmp_path):
     return write_config(tmp_path, OPERATOR_CONFIG)
 
 
-def test_install_adds_three_event_entries(real_shape, home):
+def test_install_adds_four_event_entries(real_shape, home):
     code = install.install(real_shape, home=home)
     assert code == 0
     data = load(real_shape)
     events = data["hooks"]["events"]
-    assert set(events) >= {"SessionStart", "Stop", "PermissionRequest"}
+    assert set(events) >= {
+        "SessionStart",
+        "Stop",
+        "PermissionRequest",
+        "UserPromptSubmit",
+    }
     assert len(events["SessionStart"]) == 3
     ours = events["SessionStart"][2]["hooks"][0]
     assert ours["type"] == "command"
@@ -91,6 +96,83 @@ def test_install_adds_three_event_entries(real_shape, home):
     assert ours["timeout"] == 10
     assert events["PermissionRequest"][0]["hooks"][0]["timeout"] == 310
     assert isinstance(ours["statusMessage"], str) and ours["statusMessage"]
+
+
+def test_userpromptsubmit_entry_is_registered_with_the_prompt_timeout(
+    real_shape, home
+):
+    code = install.install(real_shape, home=home)
+    assert code == 0
+    events = load(real_shape)["hooks"]["events"]
+    entry = events["UserPromptSubmit"][0]["hooks"][0]
+    assert entry["command"] == (
+        "tug hook-zcode UserPromptSubmit # tugline:zcode"
+    )
+    assert entry["timeout"] == 10
+
+
+def test_reinstall_over_a_legacy_three_event_config_appends_only_the_new_event(
+    tmp_path, home
+):
+    """The live config carries the three pre-W7-L17 events; the
+    upgraded installer must append UserPromptSubmit and touch nothing
+    else (append-only installer discipline, idempotent)."""
+    legacy = dict(OPERATOR_CONFIG)
+    legacy["hooks"] = json.loads(json.dumps(OPERATOR_CONFIG["hooks"]))
+    legacy["hooks"]["events"]["Stop"] = [
+        {
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": "tug hook-zcode Stop # tugline:zcode",
+                    "timeout": 10,
+                    "statusMessage": "tugline",
+                }
+            ]
+        }
+    ]
+    legacy["hooks"]["events"]["PermissionRequest"] = [
+        {
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": "tug hook-zcode PermissionRequest # tugline:zcode",
+                    "timeout": 310,
+                    "statusMessage": "tugline",
+                }
+            ]
+        }
+    ]
+    legacy["hooks"]["events"]["SessionStart"].append(
+        {
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": "tug hook-zcode SessionStart # tugline:zcode",
+                    "timeout": 10,
+                    "statusMessage": "tugline",
+                }
+            ]
+        }
+    )
+    path = write_config(tmp_path, legacy)
+
+    before = read_bytes(path)
+    assert install.install(path, home=home) == 0
+
+    data = load(path)
+    events = data["hooks"]["events"]
+    assert len(events["SessionStart"]) == 3  # untouched
+    assert len(events["Stop"]) == 1  # untouched
+    assert len(events["PermissionRequest"]) == 1  # untouched
+    assert events["UserPromptSubmit"][0]["hooks"][0]["command"] == (
+        "tug hook-zcode UserPromptSubmit # tugline:zcode"
+    )
+    # idempotent: a second run changes nothing
+    snapshot = read_bytes(path)
+    assert install.install(path, home=home) == 0
+    assert read_bytes(path) == snapshot
+    assert before != snapshot  # sanity: the first run did append
 
 
 def test_install_preserves_operator_entries(real_shape, home):
@@ -162,6 +244,7 @@ def test_install_on_config_without_hooks_round_trips(tmp_path, home):
         "SessionStart",
         "Stop",
         "PermissionRequest",
+        "UserPromptSubmit",
     }
     assert uninstall.uninstall(path, home=home) == 0
     assert read_bytes(path) == original
@@ -193,6 +276,7 @@ def test_install_on_missing_config_creates_file(tmp_path, home):
         "SessionStart",
         "Stop",
         "PermissionRequest",
+        "UserPromptSubmit",
     }
     backups = glob.glob(path + ".tugline-bak-*")
     assert backups == []
