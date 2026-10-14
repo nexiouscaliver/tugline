@@ -525,3 +525,33 @@ def test_unreadable_journal_never_raises(tmp_path):
     assert result["ok"] is False
     assert result["reason"] == "timeout"
     runner._test_store.close()
+
+
+def test_ask_thread_survives_approval_reconciliation(tmp_path):
+    """An open ask thread must stay open when refresh_threads runs:
+    ask threads have no approval pending files, so reconciling them
+    against the approvals directory (the console ingest does, every
+    couple of seconds) would expire every live ask instantly."""
+    import os
+
+    from tugline.core.store import Store
+
+    store = Store(tmp_path / "store" / "tugline.db")
+    store._upsert_session(
+        "sess_ask1", "sessionstart", "2026-10-14T00:00:00+00:00",
+        {"adapter": "zcode", "project": "p", "cwd": "/tmp"},
+    )
+    thread = store.create_ask_thread(
+        "sess_ask1", "pick one",
+        [{"key": "A", "text": "go"}, {"key": "B", "text": "stop"}],
+    )
+    approvals = tmp_path / "approvals"
+    approvals.mkdir()
+    counts = store.refresh_threads(approvals)
+    row = next(
+        t for t in store.threads() if t["nonce"] == thread["nonce"]
+    )
+    assert row["status"] == "open", (
+        "ask thread expired by approval reconciliation: %r (counts %r)"
+        % (row["status"], counts)
+    )

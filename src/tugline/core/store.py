@@ -885,7 +885,8 @@ class Store:
         root = str(approvals_root)
         counts = {"answered": 0, "open": 0, "expired": 0}
         rows = self.conn.execute(
-            "SELECT nonce, status FROM threads WHERE status != 'answered'"
+            "SELECT nonce, status FROM threads"
+            " WHERE status != 'answered' AND kind != 'ask'"
         ).fetchall()
         updates = []
         for row in rows:
