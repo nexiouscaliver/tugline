@@ -153,6 +153,67 @@ def test_userpromptsubmit_records_only_never_publishes(home, config_path):
     assert rec["event"] == "userpromptsubmit"
 
 
+# Stop records carry a response preview for the console's session detail
+
+
+def test_stop_record_carries_response_preview(home, config_path):
+    code = run_hook(
+        "Stop",
+        '{"hook_event_name":"Stop","session_id":"s-p",'
+        '"last_assistant_message":"done with the refactor"}',
+        config_path=config_path,
+        home=home,
+    )
+    assert code == 0
+    rec = spool_records(home)[0]
+    assert rec["event"] == "stop"
+    assert rec["response_preview"] == "done with the refactor"
+
+
+def test_stop_preview_truncates_at_600_characters(home, config_path):
+    code = run_hook(
+        "Stop",
+        json.dumps(
+            {
+                "hook_event_name": "Stop",
+                "session_id": "s-long",
+                "last_assistant_message": "y" * 700,
+            }
+        ),
+        config_path=config_path,
+        home=home,
+    )
+    assert code == 0
+    rec = spool_records(home)[0]
+    assert len(rec["response_preview"]) == 600
+    assert rec["response_preview"] == "y" * 600
+
+
+def test_stop_without_a_message_carries_empty_preview(home, config_path):
+    code = run_hook(
+        "Stop",
+        '{"hook_event_name":"Stop","session_id":"s-calm-2"}',
+        config_path=config_path,
+        home=home,
+    )
+    assert code == 0
+    rec = spool_records(home)[0]
+    assert rec["response_preview"] == ""
+
+
+def test_non_stop_records_do_not_carry_a_preview(home, config_path):
+    code = run_hook(
+        "SessionStart",
+        '{"hookEventName":"SessionStart","source":"resume","sessionId":"s-n",'
+        '"last_assistant_message":"leftover"}',
+        config_path=config_path,
+        home=home,
+    )
+    assert code == 0
+    rec = spool_records(home)[0]
+    assert "response_preview" not in rec
+
+
 # Session enrichment fields (adapter, cwd, project) on every record
 
 

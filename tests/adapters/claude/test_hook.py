@@ -37,6 +37,46 @@ def test_stop_spools_a_stop_record(tug_home, hook_payload, spool_records, capsys
     assert capsys.readouterr().out == ""
 
 
+# Stop records carry a response preview for the console's session detail
+
+
+def test_stop_record_carries_the_response_preview(
+    tug_home, hook_payload, spool_records
+):
+    payload = hook_payload("Stop", last_assistant_message="shipped the fix")
+    assert run("Stop", payload) == 0
+    record = spool_records()[0]
+    assert record["response_preview"] == "shipped the fix"
+
+
+def test_stop_preview_truncates_at_600_characters(
+    tug_home, hook_payload, spool_records
+):
+    payload = hook_payload("Stop", last_assistant_message="z" * 700)
+    assert run("Stop", payload) == 0
+    record = spool_records()[0]
+    assert record["response_preview"] == "z" * 600
+
+
+def test_stop_without_a_message_carries_an_empty_preview(
+    tug_home, hook_payload, spool_records
+):
+    assert run("Stop", hook_payload("Stop")) == 0
+    assert spool_records()[0]["response_preview"] == ""
+
+
+def test_non_stop_records_do_not_carry_a_preview(
+    tug_home, hook_payload, spool_records
+):
+    payload = hook_payload(
+        "Notification",
+        message="waiting",
+        last_assistant_message="leftover",
+    )
+    assert run("Notification", payload) == 0
+    assert "response_preview" not in spool_records()[0]
+
+
 # SessionStart
 
 
