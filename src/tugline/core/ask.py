@@ -307,7 +307,21 @@ class AskRunner:
                 continue
             key = match_option(options, row.get("body"))
             if key is not None:
-                self.store.answer_ask_thread(nonce, key)
+                try:
+                    self.store.answer_ask_thread(nonce, key)
+                except ValueError:
+                    # the console answer endpoint closes the thread
+                    # first and records the reply row second; a poll
+                    # that sees the row after the close reads it as
+                    # the answer, not as a race error
+                    current = self.store._thread_row(nonce)
+                    if (
+                        not current
+                        or current.get("status") != "answered"
+                        or str(current.get("answer") or "").upper()
+                        != key.upper()
+                    ):
+                        raise
                 return key
         return None
 
