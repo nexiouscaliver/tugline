@@ -146,19 +146,8 @@ main {
   #stream-panel { grid-area: stream; }
 }
 
-/* phones stack the panels with the stream directly under sessions:
-   header, sessions, stream, asks, reply */
-@media (max-width: 719px) {
-  main {
-    display: flex;
-    flex-direction: column;
-    gap: 0.7rem;
-  }
-  #sessions-panel { order: 1; }
-  #stream-panel { order: 2; }
-  #asks-panel { order: 3; }
-  #reply-panel { order: 4; }
-}
+/* phones restructure everything in the block at the bottom of this
+   file: one panel at a time above a fixed bottom tab bar */
 
 .panel {
   background: var(--panel);
@@ -284,6 +273,9 @@ tr.selected .idlink { color: var(--accent); }
   max-width: 18rem;
 }
 
+/* the full last-event body fills the phone card; hidden on desktop */
+.cell-event .evbody { display: none; }
+
 .cell-time {
   font-family: var(--mono);
   color: var(--muted);
@@ -299,72 +291,6 @@ tr.selected .idlink { color: var(--accent); }
 
 #sessions-table.no-project .col-project,
 #sessions-table.no-project td.cell-project { display: none; }
-
-/* phones: session rows restyle as stacked two-line rows. Line 1 is
-   the state chip, short id, adapter badge, relative time; line 2 is
-   the last event with ellipsis plus the project label. Nothing
-   scrolls sideways. */
-@media (max-width: 719px) {
-  .scroll { overflow: visible; }
-
-  #sessions-table {
-    display: block;
-    min-width: 0;
-  }
-
-  #sessions-table thead { display: none; }
-
-  #sessions-table tbody { display: block; }
-
-  #sessions-table tr {
-    display: grid;
-    grid-template-columns: auto minmax(0, 1fr) auto auto;
-    grid-template-areas:
-      "state id adapter time"
-      "event event event project";
-    column-gap: 0.55rem;
-    row-gap: 0.2rem;
-    align-items: center;
-    padding: 0.45rem 0;
-    border-bottom: 1px solid var(--row-line);
-  }
-
-  #sessions-table tr.selected { background: rgba(88, 166, 255, 0.09); }
-
-  #sessions-table td {
-    display: block;
-    min-width: 0;
-    padding: 0;
-    border: none;
-  }
-
-  #sessions-table tr.selected td { background: none; }
-
-  #sessions-table td.cell-state { grid-area: state; }
-  #sessions-table td.cell-id { grid-area: id; }
-  #sessions-table td.cell-badge {
-    grid-area: adapter;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-  #sessions-table td.cell-time { grid-area: time; justify-self: end; }
-
-  #sessions-table td.cell-event {
-    grid-area: event;
-    max-width: none;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  #sessions-table td.cell-project {
-    grid-area: project;
-    justify-self: end;
-    max-width: 40%;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-}
 
 /* -- live stream -- */
 
@@ -409,37 +335,12 @@ tr.selected .idlink { color: var(--accent); }
 .stream .chip,
 .stream .nochip { justify-self: end; }
 
-/* phones: stream rows are flex rows that fit the viewport. The
-   flexible text ellipsizes instead of clipping mid-word, and the
-   delivery chip never shrinks, so it stays visible. */
-@media (max-width: 719px) {
-  .stream { min-width: 0; }
+/* the head group (time, event, session id) is layout-transparent on
+   desktop: its spans stay direct grid items of the 5-column row */
+.stream .srow { display: contents; }
 
-  .stream li {
-    display: flex;
-    align-items: baseline;
-    gap: 0.4rem;
-    min-width: 0;
-  }
-
-  .stream .t,
-  .stream .sid { flex: none; }
-
-  .stream .ev {
-    flex: 0 1 auto;
-    min-width: 0;
-    max-width: 9ch;
-    white-space: nowrap;
-  }
-
-  .stream .tx {
-    flex: 1 1 0;
-    min-width: 0;
-  }
-
-  .stream .chip,
-  .stream .nochip { flex: none; }
-}
+/* the full body wraps under the title on phones only */
+.stream .tx-extra { display: none; }
 
 /* -- asks -- */
 
@@ -618,4 +519,129 @@ textarea:disabled { opacity: 0.45; }
   font-family: var(--mono);
   color: var(--muted);
   white-space: nowrap;
+}
+
+/* -- phones (max-width 719px): tabs, full text, whole-row targets --
+   One panel is visible at a time above a fixed bottom tab bar (the
+   only fixed element); the header status strip and the panel scroll
+   away with the page. Nothing truncates: cards and rows wrap their
+   full text, and every control keeps a 44px target. Desktop layout
+   above is untouched by this block. */
+@media (max-width: 719px) {
+  main {
+    display: flex;
+    flex-direction: column;
+    gap: 0.7rem;
+    padding-bottom: calc(4.4rem + env(safe-area-inset-bottom, 0px));
+  }
+  .panel { display: none; }
+  .panel.active { display: block; }
+
+  .tabbar {
+    display: block;
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 20;
+    background: var(--panel);
+    border-top: 1px solid var(--border);
+  }
+  /* a dropped live stream draws this thin amber line above the tabs,
+     so the reconnecting state survives the header scrolling away */
+  .dropline { position: absolute; top: -3px; left: 0; right: 0; height: 3px; background: var(--amber); }
+  .dropline[hidden] { display: none; }
+  .tabs {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    max-width: 1380px;
+    margin: 0 auto;
+  }
+  .tab {
+    min-height: 50px;
+    padding: 0 0.25rem 0.3rem;
+    background: none;
+    border: none;
+    border-top: 2px solid transparent;
+    color: var(--muted);
+    font-family: var(--sans);
+    font-size: 0.95rem;
+    cursor: pointer;
+  }
+  .tab.active { color: var(--accent); border-top-color: var(--accent); font-weight: 600; }
+
+  /* sessions: cards with the full wrapped text; the whole card taps */
+  .scroll { overflow: visible; }
+  #sessions-table { display: block; min-width: 0; }
+  #sessions-table thead { display: none; }
+  #sessions-table tbody { display: block; }
+  #sessions-table tr {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    column-gap: 0.55rem;
+    row-gap: 0.25rem;
+    min-height: 44px;
+    padding: 0.6rem 0.65rem;
+    margin-bottom: 0.55rem;
+    border: 1px solid var(--border);
+    border-radius: 2px;
+    cursor: pointer;
+  }
+  #sessions-table tr.selected { border-color: var(--accent); background: rgba(88, 166, 255, 0.07); }
+  #sessions-table td { display: block; min-width: 0; padding: 0; border: none; white-space: normal; }
+  #sessions-table tr.selected td { background: none; }
+  #sessions-table td.cell-state { order: 0; }
+  #sessions-table td.cell-badge { order: 1; max-width: none; overflow: visible; }
+  #sessions-table td.cell-id { order: 2; }
+  #sessions-table td.cell-project { order: 3; max-width: none; overflow: visible; }
+  #sessions-table td.cell-time { order: 4; margin-left: auto; }
+  #sessions-table td.cell-event { order: 5; flex-basis: 100%; max-width: none; overflow: visible; }
+  .cell-event .evbody { display: block; margin-top: 0.1rem; color: var(--muted); font-family: var(--sans); }
+
+  /* stream: time, event, id and the delivery chip hold line one; the
+     full title and body wrap below */
+  .stream { min-width: 0; }
+  .stream li {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-areas:
+      "head chip"
+      "text text"
+      "extra extra";
+    row-gap: 0.15rem;
+    column-gap: 0.5rem;
+    align-items: baseline;
+    padding: 0.35rem 0;
+  }
+  .stream .srow {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 0.25rem 0.45rem;
+    min-width: 0;
+    grid-area: head;
+  }
+  .stream .srow .ev { overflow: visible; }
+  .stream .tx { grid-area: text; white-space: normal; overflow: visible; }
+  .stream .tx-extra { display: block; grid-area: extra; color: var(--muted); white-space: normal; }
+  .stream .chip, .stream .nochip { grid-area: chip; justify-self: end; }
+  .more { width: 100%; min-height: 44px; margin-top: 0.6rem; font-size: 0.95rem; }
+
+  /* asks: full body text, large decision buttons, roomy reply link */
+  .ask-line .sid { order: 0; }
+  .ask-line .age { order: 1; margin-left: auto; }
+  .ask-line .tx { order: 2; flex-basis: 100%; white-space: normal; overflow: visible; }
+  .ask-line .btn-approve { order: 3; }
+  .ask-line .btn-deny { order: 4; }
+  .ask-line .btn-approve, .ask-line .btn-deny { flex: 1 1 40%; min-height: 44px; font-size: 0.95rem; }
+  .ask-line .linkish { order: 5; flex-basis: 100%; min-height: 44px; display: flex; align-items: center; font-size: 0.95rem; }
+  .settled .tx { white-space: normal; overflow: visible; }
+
+  /* reply: the send button is a full-width 44px target; recent
+     replies wrap. Form controls use 16px text because iOS zooms the
+     viewport on focus otherwise; prose keeps the 15px base */
+  textarea, .tokenbar input { font-size: 16px; }
+  #reply-send { flex: 1; min-height: 44px; font-size: 0.95rem; }
+  .recent .tx { white-space: normal; overflow: visible; }
 }

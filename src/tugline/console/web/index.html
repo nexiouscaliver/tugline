@@ -25,7 +25,7 @@
   <button type="button" class="btn" id="token-save">use</button>
 </div>
 <main>
-  <section class="panel" id="sessions-panel" aria-label="sessions">
+  <section class="panel active" id="sessions-panel" aria-label="sessions">
     <h2>sessions</h2>
     <div class="scroll">
       <table id="sessions-table">
@@ -63,8 +63,18 @@
     <div class="scroll">
       <ol class="stream" id="stream"></ol>
     </div>
+    <button type="button" class="btn more" id="stream-more" hidden>show older events</button>
     <p class="empty" id="stream-empty" hidden>no events yet</p>
   </section>
 </main>
+<nav class="tabbar" aria-label="panels">
+  <div class="dropline" id="drop-line" hidden></div>
+  <div class="tabs">
+    <button type="button" class="tab active" id="tab-sessions">Sessions</button>
+    <button type="button" class="tab" id="tab-stream">Stream</button>
+    <button type="button" class="tab" id="tab-asks">Asks</button>
+    <button type="button" class="tab" id="tab-reply">Reply</button>
+  </div>
+</nav>
 </body>
 </html>
