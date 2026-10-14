@@ -26,13 +26,17 @@
  * Session identity is operator-first: each row carries a rename
  * affordance backed by PUT /api/sessions/<id>/label, and when a label
  * is set it is the primary name (the id drops to a small secondary
- * line). Ids shown anywhere are display_id values computed per
- * response by the server: suffixes lengthened until unique, so two
- * sessions sharing a tail never render the same short id. State chips
- * read display_state (active now, running, waiting on me, idle,
- * done): the server derives it from recency, so a session whose last
- * event is hours old never shows running. The panel sorts active-now
- * rows first, then by recency.
+ * line). Sessions also carry tags: small chips with a remove x plus
+ * a tag link that opens an inline add editor, backed by PUT and
+ * DELETE /api/sessions/<id>/tag/<tag>. Tags are lowercase letters,
+ * digits, and hyphens (the server normalizes; anything else in the
+ * input is dropped). Ids shown anywhere are display_id values
+ * computed per response by the server: suffixes lengthened until
+ * unique, so two sessions sharing a tail never render the same short
+ * id. State chips read display_state (active now, running, waiting
+ * on me, idle, done): the server derives it from recency, so a
+ * session whose last event is hours old never shows running. The
+ * panel sorts active-now rows first, then by recency.
  */
 
 const EVENTS_LIMIT = 50;
@@ -156,7 +160,9 @@ async function api(path, options) {
   }
   if (!response.ok) {
     if (response.status === 403) showTokenBar(); // the paste fallback
-    throw new Error(payload.error || "HTTP " + response.status);
+    const error = new Error(payload.error || "HTTP " + response.status);
+    error.payload = payload; // carries e.g. the ambiguous session list
+    throw error;
   }
   return payload;
 }
@@ -244,7 +250,8 @@ function lastEventText(session) {
 
 function idCellContent(session) {
   // the label is the primary name when set; the collision-proof short
-  // id is always visible beside or beneath it
+  // id is always visible beside or beneath it; tags render as chips
+  // with a remove x, plus a link that adds one more
   const wrap = el("div", "idwrap");
   const shown = String(session.display_id || short8(session.session_id));
   const button = el(
@@ -261,12 +268,102 @@ function idCellContent(session) {
   button.addEventListener("click", () => toggleSession(session.session_id));
   wrap.append(button);
   if (session.label) wrap.append(el("div", "idsub", shown));
+  wrap.append(tagChips(session));
   const rename = el("button", "linkish rename", "rename");
   rename.type = "button";
   rename.title = "set a label for this session";
   rename.addEventListener("click", () => startRename(session, wrap));
   wrap.append(rename);
   return wrap;
+}
+
+// -- tags: chips with remove, an inline add editor --
+
+function tagChips(session) {
+  const line = el("div", "tagline");
+  for (const tag of session.tags || []) {
+    const chip = el("span", "tagchip", String(tag));
+    const remove = el("button", "tagx", "x");
+    remove.type = "button";
+    remove.title = "remove tag " + tag;
+    remove.setAttribute("aria-label", "remove tag " + tag);
+    remove.addEventListener("click", () => removeTag(session, tag));
+    chip.append(remove);
+    line.append(chip);
+  }
+  const add = el("button", "linkish tagadd", "tag");
+  add.type = "button";
+  add.title = "add a tag to this session";
+  add.addEventListener("click", () => startAddTag(session, line));
+  line.append(add);
+  return line;
+}
+
+function startAddTag(session, line) {
+  // one inline editor in place of the chips: enter adds (the server
+  // normalizes to lowercase letters, digits, hyphens), escape or blur
+  // cancels
+  const input = document.createElement("input");
+  input.type = "text";
+  input.className = "rename-input tag-input";
+  input.maxLength = 24;
+  input.placeholder = "tag (a-z, 0-9, -)";
+  const hint = el("span", "taghint", "enter adds, esc cancels");
+  line.replaceChildren(input, hint);
+  input.focus();
+  let settled = false;
+  const finish = async (save) => {
+    if (settled) return;
+    if (!save) {
+      settled = true;
+      paintSessions();
+      return;
+    }
+    const value = input.value.trim();
+    if (!value) {
+      settled = true;
+      paintSessions();
+      return;
+    }
+    try {
+      await addOrRemoveTag(session, value, "PUT");
+      settled = true;
+      await refreshSessions();
+    } catch (err) {
+      hint.textContent = "add failed: " + err.message;
+      input.focus();
+    }
+  };
+  input.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      finish(true);
+    } else if (event.key === "Escape") {
+      event.preventDefault();
+      finish(false);
+    }
+  });
+  input.addEventListener("blur", () => finish(false));
+}
+
+async function addOrRemoveTag(session, tag, method) {
+  await api(
+    "/api/sessions/" +
+      encodeURIComponent(session.session_id) +
+      "/tag/" +
+      encodeURIComponent(tag),
+    { method: method }
+  );
+}
+
+async function removeTag(session, tag) {
+  try {
+    await addOrRemoveTag(session, tag, "DELETE");
+    await refreshSessions();
+  } catch (err) {
+    // removal cannot fail for a missing tag; a network or auth error
+    // surfaces on the next repaint anyway
+  }
 }
 
 function startRename(session, wrap) {
@@ -491,6 +588,8 @@ function paintTarget() {
   if (active && state.selected.kind === "thread") {
     text = "reply via thread " + short8(state.selected.id);
   } else if (active && state.selected.kind === "session") {
+    // the resolved target, label first, id second: the operator
+    // always sees exactly where the reply goes
     text = "reply to session " + targetName(state.selected.id);
   }
   line.textContent = text;
@@ -583,7 +682,14 @@ async function sendReply() {
       paintReplies();
     }
   } catch (err) {
-    errorNode.textContent = "send failed: " + err.message;
+    let text = "send failed: " + err.message;
+    // an ambiguous name answer lists the matching sessions so the
+    // operator can see the choice and pick a row instead
+    const matches = err.payload && err.payload.sessions;
+    if (Array.isArray(matches) && matches.length > 1) {
+      text += " (" + matches.map((one) => sid(one)).join(", ") + ")";
+    }
+    errorNode.textContent = text;
     errorNode.hidden = false;
   } finally {
     paintTarget(); // restores the send button for the current target

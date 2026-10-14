@@ -308,6 +308,66 @@ tr.selected .idlink { color: var(--accent); }
   color: var(--muted);
 }
 
+/* tags: small chips under the session name, each with a remove x,
+   plus the linkish tag affordance that opens the inline add editor */
+.tagline {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.2rem;
+  max-width: 16rem;
+}
+
+.tagchip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.15rem;
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  line-height: 1;
+  padding: 0.18rem 0.2rem 0.18rem 0.35rem;
+  border-radius: 2px;
+  border: 1px solid rgba(139, 148, 158, 0.45);
+  background: rgba(139, 148, 158, 0.08);
+  color: var(--muted);
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tagx {
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  line-height: 1;
+  color: var(--muted);
+  background: none;
+  border: none;
+  padding: 0.1rem 0.2rem;
+  cursor: pointer;
+  min-width: 1.2rem;
+  min-height: 1.2rem;
+}
+
+.tagx:hover {
+  color: var(--red);
+}
+
+.idwrap .tagadd {
+  font-size: 0.75rem;
+  color: var(--muted);
+}
+
+.idwrap .tagadd:hover { color: var(--accent); }
+
+.tag-input {
+  max-width: 9rem;
+}
+
+.taghint {
+  font-size: 0.7rem;
+  color: var(--muted);
+}
+
 .idwrap .rename:hover { color: var(--accent); }
 
 .rename-input {

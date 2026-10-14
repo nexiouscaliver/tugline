@@ -244,12 +244,12 @@ def test_put_label_accepts_bearer_and_query_token(token_bench):
 # -- schema migration: existing dbs gain the label column in place --
 
 
-def test_fresh_store_is_schema_version_three(tmp_path):
+def test_fresh_store_is_schema_version_four(tmp_path):
     store = Store(tmp_path / "store" / "tugline.db")
     version = store.conn.execute(
         "SELECT value FROM meta WHERE key = 'schema_version'"
     ).fetchone()[0]
-    assert version == "3"
+    assert version == "4"
     cols = {
         row[1] for row in store.conn.execute("PRAGMA table_info(sessions)")
     }
@@ -285,7 +285,7 @@ def test_version_two_store_migrates_label_in_place(tmp_path):
     version = store.conn.execute(
         "SELECT value FROM meta WHERE key = 'schema_version'"
     ).fetchone()[0]
-    assert version == "3"
+    assert version == "4"
     # the live row rides over untouched, label starts NULL
     row = store.sessions()[0]
     assert row["session_id"] == "live-1"
