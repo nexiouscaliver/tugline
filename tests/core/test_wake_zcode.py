@@ -18,10 +18,25 @@ import stat
 
 from tugline.core import config as cfg
 from tugline.core import spool
+from tugline.core import wake as wake_mod
 from tugline.core.store import Store
 from tugline.core.wake import DEFAULT_ZCODE_COMMAND, WakeDispatcher
 
 ZCODE_CJS = "/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs"
+
+
+def pin_fake_node(tmp_path, monkeypatch, sub="node-bin"):
+    """Point PATH and the extra exec roots at a fixture dir holding a
+    fake node, so bare-name resolution is deterministic: never the
+    real /opt/homebrew, and never "whatever this machine's PATH has"."""
+    bindir = tmp_path / sub
+    bindir.mkdir(exist_ok=True)
+    script = bindir / "node"
+    script.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    os.chmod(script, os.stat(script).st_mode | stat.S_IXUSR)
+    monkeypatch.setenv("PATH", str(bindir))
+    monkeypatch.setattr(wake_mod, "EXTRA_EXEC_PATHS", [])
+    return bindir
 
 
 def make_config(wake=None, wake_enabled=True):
@@ -163,7 +178,10 @@ def test_default_zcode_command_is_the_verified_flag_order():
 # -- dispatch on an idle zcode session --
 
 
-def test_wake_dispatches_idle_zcode_session(tmp_path):
+def test_wake_dispatches_idle_zcode_session(tmp_path, monkeypatch):
+    # bare "node" resolves against PATH before the spawn: pinned to a
+    # fixture dir so the assertion holds on any machine
+    bindir = pin_fake_node(tmp_path, monkeypatch)
     seed_store(tmp_path)
     append_reply(tmp_path)
     spawn = FakeSpawn()
@@ -176,7 +194,7 @@ def test_wake_dispatches_idle_zcode_session(tmp_path):
     assert len(spawn.calls) == 1
     call = spawn.calls[0]
     assert call["argv"] == [
-        "node",
+        str(bindir / "node"),
         ZCODE_CJS,
         "--resume",
         "sess-z1",
@@ -299,7 +317,12 @@ def test_unknown_adapter_still_queues_for_injection(tmp_path):
 # -- dry run records the exact command --
 
 
-def test_zcode_dry_run_records_the_command_without_spawning(tmp_path):
+def test_zcode_dry_run_records_the_command_without_spawning(
+    tmp_path, monkeypatch
+):
+    # the recorded command carries the resolved node path, so the
+    # journal previews the spawn that would really happen
+    bindir = pin_fake_node(tmp_path, monkeypatch)
     seed_store(tmp_path)
     append_reply(tmp_path)
     spawn = FakeSpawn()
@@ -314,7 +337,7 @@ def test_zcode_dry_run_records_the_command_without_spawning(tmp_path):
     assert events[0]["dry_run"] is True
     assert events[0]["adapter"] == "zcode"
     assert events[0]["command"] == [
-        "node",
+        str(bindir / "node"),
         ZCODE_CJS,
         "--resume",
         "sess-z1",
@@ -323,6 +346,7 @@ def test_zcode_dry_run_records_the_command_without_spawning(tmp_path):
         "--cwd",
         "/tmp/zcode-proj",
     ]
+    assert "argv0_resolved" not in events[0]
 
 
 # -- the real spawn path with a fake node and a fake CLI script --
