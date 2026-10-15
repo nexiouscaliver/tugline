@@ -40,6 +40,13 @@ The zcode flags are verified against the app-bundled CLI's own help
 (v0.16.9: -p, --resume, --cwd; --mode left at its documented
 --prompt default, yolo).
 
+Bare driver names are resolved against PATH plus a few extra roots
+(see EXTRA_EXEC_PATHS) before the journal or the spawn sees them:
+the daemon runs under launchd, whose PATH=/usr/bin:/bin:/usr/sbin:
+/sbin has no node, and both live wake dispatches died with
+"[Errno 2] No such file or directory: 'node'" while the same
+command worked from every interactive shell.
+
 The store is probed read-only (the console's ingest thread keeps it
 current within its interval); a missing, busy, or broken store means
 no wakes, never a crash.
@@ -49,6 +56,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import sqlite3
 import subprocess
 import time
@@ -111,10 +119,55 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+# The launchd PATH gap: daemon sessions get /usr/bin:/bin:/usr/sbin:
+# /sbin and none of the shell's fragments, while Homebrew installs
+# node under /opt/homebrew/bin (Apple Silicon) or /usr/local/bin
+# (Intel). A bare "node" argv[0] (exactly what the zcode driver
+# template spawns) is therefore unfindable under the daemon and fine
+# in every interactive shell, which is why tests and manual runs
+# never saw the production deaths. These roots are appended to PATH
+# when resolving and spawning driver commands; the module-level
+# list is the seam tests patch with fixture dirs.
+EXTRA_EXEC_PATHS = ["/opt/homebrew/bin", "/usr/local/bin"]
+
+
+def _augmented_path(env=None):
+    """PATH from env (falling back to the process environment) plus
+    the extra roots, empty components dropped: the os.pathsep-joined
+    search string shutil.which consumes."""
+    source = os.environ if env is None else env
+    parts = [source.get("PATH") or ""]
+    parts.extend(EXTRA_EXEC_PATHS)
+    return os.pathsep.join([p for p in parts if p])
+
+
+def resolve_executable(argv, env=None):
+    """Resolve a bare argv[0] against the augmented PATH.
+
+    A name carrying a path separator is already an explicit choice
+    by the config author and passes through untouched; so does
+    anything the augmented PATH cannot find, because the spawn then
+    fails with the OS error and the existing error journaling owns
+    that failure better than a guess here could. Only a bare name
+    that resolves comes back rewritten as [absolute path] + rest."""
+    if not argv or os.path.sep in argv[0]:
+        return argv
+    found = shutil.which(argv[0], path=_augmented_path(env))
+    if not found:
+        return argv
+    return [found] + list(argv[1:])
+
+
 def _default_spawn(argv, cwd=None):
+    # the child inherits the augmented PATH, not just the resolved
+    # argv[0]: node's own children (git shims, package-manager
+    # helpers) would hit the same launchd gap one process later
+    env = dict(os.environ)
+    env["PATH"] = _augmented_path()
     return subprocess.Popen(
         argv,
         cwd=cwd,
+        env=env,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         stdin=subprocess.DEVNULL,
@@ -241,20 +294,36 @@ class WakeDispatcher:
             .replace("{cwd}", cwd_value)
             for part in command
         ]
+        # resolved before the dry/real fork so the journal and the
+        # spawn agree on one command: under launchd a bare argv[0]
+        # like "node" is unfindable on the daemon's minimal PATH, so
+        # it becomes an absolute path when the augmented PATH knows
+        # it and stays bare (spawn error, existing error journaling)
+        # when nothing does
+        argv = resolve_executable(argv)
         dry = bool(self.config.wake.dry_run)
         if dry:
             self._seen.add(rid)
-            self._journal(
-                {
-                    "event": "dispatched",
-                    "reply_id": rid,
-                    "reply_ts": str(entry.get("ts") or ""),
-                    "session_id": session_id,
-                    "adapter": adapter,
-                    "command": argv,
-                    "dry_run": True,
-                }
-            )
+            record = {
+                "event": "dispatched",
+                "reply_id": rid,
+                "reply_ts": str(entry.get("ts") or ""),
+                "session_id": session_id,
+                "adapter": adapter,
+                "command": argv,
+                "dry_run": True,
+            }
+            if os.path.sep not in argv[0]:
+                # a dry run is a preflight: it previews the dispatch
+                # that would really happen, so it must say when that
+                # dispatch would die on spawn
+                record["argv0_resolved"] = False
+                self.log(
+                    "wake dry run: driver %s unresolvable on PATH for"
+                    " session %s reply %s; a real dispatch would fail"
+                    " to spawn" % (argv[0], session_id, rid)
+                )
+            self._journal(record)
             self.log(
                 "wake dispatched: session %s adapter %s reply %s (dry run)"
                 % (session_id, adapter, rid)
