@@ -316,6 +316,48 @@ def _emit_unread_replies(home, session_id, out):
         return 0
 
 
+def _record_runtime_env(home):
+    """Best-effort record of the app-injected provider config env.
+
+    WHY: the zcode app injects ZCODE_BUILTIN_PROVIDER_CONFIG_FILE
+    (and usually ZCODE_PERSONAL_PROVIDER_CONFIG_FILE) into every
+    child process, including this hook, while the launchd daemon
+    that later wakes a session through the CLI has neither variable
+    and the CLI's own fallback paths do not exist on disk (a
+    daemon-spawned wake died in 6s on "cannot locate CLI ZCode
+    Built-in Provider Config"). The hook runs inside app sessions,
+    where the real values live, so it snapshots them to
+    state/zcode-runtime.json and the daemon-side wake spawn merges
+    them back in (see wake.zcode_runtime_env). Rewritten on every
+    hook invocation because app upgrades move the versioned paths;
+    a non-app context (no builtin var) writes nothing at all so a
+    stale invocation can never clobber the last good record.
+    Atomic via tmp + os.replace, and no failure path raises into
+    the hook.
+    """
+    builtin = os.environ.get("ZCODE_BUILTIN_PROVIDER_CONFIG_FILE")
+    if not builtin:
+        return
+    record = {
+        "builtin_provider_config": builtin,
+        "personal_provider_config": os.environ.get(
+            "ZCODE_PERSONAL_PROVIDER_CONFIG_FILE"
+        ),
+        "ts": datetime.now(timezone.utc).isoformat(),
+    }
+    path = os.path.join(str(home), "state", "zcode-runtime.json")
+    tmp = path + ".tmp"
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(tmp, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps(record, separators=(",", ":")) + "\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+    except OSError:
+        pass
+
+
 def _legacy_record_fields(event, normalized, decision, session_id):
     """The exact title and body strings from before context enrichment."""
     if event == "permissionrequest":
@@ -397,6 +439,11 @@ def run(
     env = env if env is not None else dict(os.environ)
     out = _stdout if _stdout is not None else sys.stdout
     try:
+        # every invocation refreshes the runtime env record: the
+        # app-injected provider config paths are versioned and move
+        # with each app upgrade, so the daemon-side wake spawn must
+        # always be able to find the current ones
+        _record_runtime_env(home)
         return _run(
             event_arg,
             stdin_text,
