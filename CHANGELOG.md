@@ -272,6 +272,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Daemon-context zcode wakes no longer die on the missing provider
+  config: the zcode app injects ZCODE_BUILTIN_PROVIDER_CONFIG_FILE
+  (and the personal variant) into its child processes, but the
+  launchd daemon has neither and the CLI's fallback paths do not
+  exist on disk, so every daemon-spawned wake exited 1 in 6s on
+  "cannot locate CLI ZCode Built-in Provider Config". The zcode hook
+  now records the app-injected config paths to state/zcode-runtime.json
+  on every invocation (app upgrades move the versioned paths), and the
+  wake spawn merges them back into the child environment (setdefault
+  semantics, reread from the record at every dispatch). End-to-end
+  proven with a real resumed session answering from its context under
+  a daemon-equivalent stripped environment plus exactly those two
+  variables.
 - The zcode wake driver now continues the latest session in the
   session's project directory (`-c`) instead of resuming by id: the
   app-bundled CLI's `--resume <id> -p` form always exits 1 at model

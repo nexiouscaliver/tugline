@@ -58,6 +58,16 @@ the daemon runs under launchd, whose PATH=/usr/bin:/bin:/usr/sbin:
 "[Errno 2] No such file or directory: 'node'" while the same
 command worked from every interactive shell.
 
+The provider config bridge: the zcode app injects
+ZCODE_BUILTIN_PROVIDER_CONFIG_FILE (and the personal variant) into
+its child processes, and the zcode hook records those values to
+state/zcode-runtime.json on every invocation; the wake spawn merges
+them back into the child environment (see zcode_runtime_env and
+_default_spawn) because the launchd daemon never inherits them and
+the CLI's fallback paths do not exist on disk, so a daemon-spawned
+zcode wake otherwise dies on "cannot locate CLI ZCode Built-in
+Provider Config".
+
 The store is probed read-only (the console's ingest thread keeps it
 current within its interval); a missing, busy, or broken store means
 no wakes, never a crash.
@@ -180,12 +190,52 @@ def resolve_executable(argv, env=None):
     return [found] + list(argv[1:])
 
 
-def _default_spawn(argv, cwd=None):
+def zcode_runtime_env(state_root):
+    """The provider config variables the zcode hook recorded, as a
+    child-env dict; {} when there is nothing usable.
+
+    WHY: the zcode app injects ZCODE_BUILTIN_PROVIDER_CONFIG_FILE
+    (and the personal variant) into its children, and the hook
+    snapshots them to <state_root>/zcode-runtime.json; the daemon
+    runs under launchd and can never inherit them, and the CLI's
+    own fallback paths do not exist on disk, so without these vars
+    a daemon-spawned zcode wake dies on "cannot locate CLI ZCode
+    Built-in Provider Config". A missing file, broken json, or any
+    OSError simply means no vars: the spawn then behaves exactly
+    as it did before the bridge existed. Only present, non-null,
+    string values survive; the spawn applies them with setdefault
+    semantics so an inherited os.environ value always wins.
+    """
+    path = os.path.join(str(state_root), "zcode-runtime.json")
+    try:
+        with open(path, encoding="utf-8") as fh:
+            record = json.load(fh)
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(record, dict):
+        return {}
+    out = {}
+    builtin = record.get("builtin_provider_config")
+    if isinstance(builtin, str) and builtin:
+        out["ZCODE_BUILTIN_PROVIDER_CONFIG_FILE"] = builtin
+    personal = record.get("personal_provider_config")
+    if isinstance(personal, str) and personal:
+        out["ZCODE_PERSONAL_PROVIDER_CONFIG_FILE"] = personal
+    return out
+
+
+def _default_spawn(argv, cwd=None, runtime_env=None):
     # the child inherits the augmented PATH, not just the resolved
     # argv[0]: node's own children (git shims, package-manager
-    # helpers) would hit the same launchd gap one process later
+    # helpers) would hit the same launchd gap one process later.
+    # runtime_env carries the provider config vars the hook recorded
+    # (see zcode_runtime_env); setdefault semantics so a value the
+    # daemon's own environment already carries always wins over the
+    # record.
     env = dict(os.environ)
     env["PATH"] = _augmented_path()
+    for key, value in (runtime_env or {}).items():
+        env.setdefault(key, value)
     return subprocess.Popen(
         argv,
         cwd=cwd,
@@ -211,7 +261,22 @@ class WakeDispatcher:
         self.replies_path = str(replies_path)
         self.state_root = str(state_root)
         self.store_path = str(store_path)
-        self._spawn = spawn or _default_spawn
+        if spawn is None:
+            # the default spawn reads the hook's runtime env record
+            # at CALL time, not a snapshot taken here: a long-lived
+            # daemon outlives app upgrades, and the versioned
+            # provider config paths inside the record change with
+            # every one of them
+            def _spawn_with_runtime_env(argv, cwd=None):
+                return _default_spawn(
+                    argv,
+                    cwd=cwd,
+                    runtime_env=zcode_runtime_env(self.state_root),
+                )
+
+            self._spawn = _spawn_with_runtime_env
+        else:
+            self._spawn = spawn
         self._log_fn = log or (lambda line: None)
         self._now = now or time.monotonic
         self.journal_path = os.path.join(self.state_root, "wake.jsonl")
