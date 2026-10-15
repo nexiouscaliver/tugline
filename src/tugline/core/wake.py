@@ -7,7 +7,7 @@ the other half. The daemon calls WakeDispatcher.poll() once per cycle
 after the spool flush:
 
 1. Reap and timeout running wakes (one log line and journal entry
-   each: dispatched, finished, timed_out).
+   each: dispatched, finished, timed_out, reopened).
 2. Read the tail of replies.jsonl for entries that are unconsumed and
    bound to a session (only the console writes session_id on a reply
    line; free-form phone replies stay on the injection path).
@@ -23,7 +23,9 @@ after the spool flush:
    - otherwise dispatch: spawn the adapter's driver with the reply
      body as the prompt, resuming that session, cwd from the store's
      session row, mark the reply consumed so the injection path never
-     double-delivers it, and journal the exact command.
+     double-delivers it, and journal the exact command. A wake whose
+     turn then fails (nonzero exit) or times out re-opens the reply
+     for the injection path instead of swallowing it.
 
 Safety rails, all mandatory: one wake per reply id, one wake in
 flight per session, a global concurrent cap (default 1), a per-wake
@@ -36,9 +38,18 @@ Driver templates are config-driven (wake.claude_command,
 wake.zcode_command). The claude flag order is verified against
 claude --help v2.1.299, where the resume-with-prompt parse error
 itself prints the usage: "claude -p --resume <session-id|title>".
-The zcode flags are verified against the app-bundled CLI's own help
-(v0.16.9: -p, --resume, --cwd; --mode left at its documented
---prompt default, yolo).
+The zcode driver continues the LATEST session in the session's cwd
+(-c) rather than resuming by id: -c is verified by a live resume
+proof against the bundled CLI (a second turn inside a pre-existing
+session, exit 0), while every --resume <id> -p run in the current
+app bundle (v0.16.9) exits 1 at model creation with "Select a model
+before continuing" because the rehydrated session loses its model
+selection. Since -c reaches whatever session is latest in --cwd,
+the dispatcher guards it: a reply bound to a session that is not
+the store's latest for its cwd skips the wake entirely (the reply
+stays queued for the injection path); a fixed bundle can restore
+--resume through wake.zcode_command, whose by-id template skips
+the guard.
 
 Bare driver names are resolved against PATH plus a few extra roots
 (see EXTRA_EXEC_PATHS) before the journal or the spawn sees them:
@@ -46,6 +57,16 @@ the daemon runs under launchd, whose PATH=/usr/bin:/bin:/usr/sbin:
 /sbin has no node, and both live wake dispatches died with
 "[Errno 2] No such file or directory: 'node'" while the same
 command worked from every interactive shell.
+
+The provider config bridge: the zcode app injects
+ZCODE_BUILTIN_PROVIDER_CONFIG_FILE (and the personal variant) into
+its child processes, and the zcode hook records those values to
+state/zcode-runtime.json on every invocation; the wake spawn merges
+them back into the child environment (see zcode_runtime_env and
+_default_spawn) because the launchd daemon never inherits them and
+the CLI's fallback paths do not exist on disk, so a daemon-spawned
+zcode wake otherwise dies on "cannot locate CLI ZCode Built-in
+Provider Config".
 
 The store is probed read-only (the console's ingest thread keeps it
 current within its interval); a missing, busy, or broken store means
@@ -76,20 +97,23 @@ DEFAULT_CLAUDE_COMMAND = [
     "{body}",
 ]
 
-# The verified zcode resume-with-prompt form, run through node
-# because the app ships a .cjs bundle, not an executable. Flags
-# checked against the bundled CLI's own help (v0.16.9): -p, --prompt
-# <text> runs a single prompt without opening the TUI, --resume
-# <sessionId> resumes a persisted session, --cwd <path> sets the
-# working directory. --mode is deliberately absent: help documents
-# yolo as the default permission mode for --prompt. The path is the
-# ZCode.app-bundled CLI, so it is version-locked to the installed
-# app and moves with it; wake.zcode_command is the override seam.
+# The verified zcode continue-with-prompt form, run through node
+# because the app ships a .cjs bundle, not an executable. -c
+# continues the LATEST session in --cwd, verified by a live resume
+# proof against the bundled CLI (v0.16.9): a second turn inside a
+# pre-existing session, exit 0. The by-id --resume <sessionId> form
+# is broken in the current app bundle (the rehydrated session loses
+# its model selection and every --resume <id> -p run exits 1 with
+# "Model creation failed" caused by "Select a model before
+# continuing"), so the default never uses it; a future fixed bundle
+# can restore it through the wake.zcode_command override seam.
+# {session} is no longer substituted by the default template: -c
+# picks the session itself, and the wake journal already records
+# session_id as its own event field.
 DEFAULT_ZCODE_COMMAND = [
     "node",
     "/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs",
-    "--resume",
-    "{session}",
+    "-c",
     "-p",
     "{body}",
     "--cwd",
@@ -109,6 +133,14 @@ def driver_command(adapter, wake_config):
     if key is None:
         return None
     return list(getattr(wake_config, key))
+
+
+def _is_continue_command(command) -> bool:
+    """A -c-shaped template: one whose literal elements include both
+    "-c" and "{cwd}". Only such a template reaches whatever session
+    is latest in --cwd, so only it needs the latest-in-cwd guard; a
+    --resume override addresses one session by id and skips it."""
+    return "-c" in command and "{cwd}" in command
 
 
 REPLY_TAIL_BYTES = 262144  # the journal tail scanned for bound replies
@@ -195,12 +227,52 @@ def resolve_executable(argv, env=None):
     return [found] + list(argv[1:])
 
 
-def _default_spawn(argv, cwd=None):
+def zcode_runtime_env(state_root):
+    """The provider config variables the zcode hook recorded, as a
+    child-env dict; {} when there is nothing usable.
+
+    WHY: the zcode app injects ZCODE_BUILTIN_PROVIDER_CONFIG_FILE
+    (and the personal variant) into its children, and the hook
+    snapshots them to <state_root>/zcode-runtime.json; the daemon
+    runs under launchd and can never inherit them, and the CLI's
+    own fallback paths do not exist on disk, so without these vars
+    a daemon-spawned zcode wake dies on "cannot locate CLI ZCode
+    Built-in Provider Config". A missing file, broken json, or any
+    OSError simply means no vars: the spawn then behaves exactly
+    as it did before the bridge existed. Only present, non-null,
+    string values survive; the spawn applies them with setdefault
+    semantics so an inherited os.environ value always wins.
+    """
+    path = os.path.join(str(state_root), "zcode-runtime.json")
+    try:
+        with open(path, encoding="utf-8") as fh:
+            record = json.load(fh)
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(record, dict):
+        return {}
+    out = {}
+    builtin = record.get("builtin_provider_config")
+    if isinstance(builtin, str) and builtin:
+        out["ZCODE_BUILTIN_PROVIDER_CONFIG_FILE"] = builtin
+    personal = record.get("personal_provider_config")
+    if isinstance(personal, str) and personal:
+        out["ZCODE_PERSONAL_PROVIDER_CONFIG_FILE"] = personal
+    return out
+
+
+def _default_spawn(argv, cwd=None, runtime_env=None):
     # the child inherits the augmented PATH, not just the resolved
     # argv[0]: node's own children (git shims, package-manager
-    # helpers) would hit the same launchd gap one process later
+    # helpers) would hit the same launchd gap one process later.
+    # runtime_env carries the provider config vars the hook recorded
+    # (see zcode_runtime_env); setdefault semantics so a value the
+    # daemon's own environment already carries always wins over the
+    # record.
     env = dict(os.environ)
     env["PATH"] = _augmented_path()
+    for key, value in (runtime_env or {}).items():
+        env.setdefault(key, value)
     return subprocess.Popen(
         argv,
         cwd=cwd,
@@ -226,7 +298,22 @@ class WakeDispatcher:
         self.replies_path = str(replies_path)
         self.state_root = str(state_root)
         self.store_path = str(store_path)
-        self._spawn = spawn or _default_spawn
+        if spawn is None:
+            # the default spawn reads the hook's runtime env record
+            # at CALL time, not a snapshot taken here: a long-lived
+            # daemon outlives app upgrades, and the versioned
+            # provider config paths inside the record change with
+            # every one of them
+            def _spawn_with_runtime_env(argv, cwd=None):
+                return _default_spawn(
+                    argv,
+                    cwd=cwd,
+                    runtime_env=zcode_runtime_env(self.state_root),
+                )
+
+            self._spawn = _spawn_with_runtime_env
+        else:
+            self._spawn = spawn
         self._log_fn = log or (lambda line: None)
         self._now = now or time.monotonic
         self.journal_path = os.path.join(self.state_root, "wake.jsonl")
@@ -308,6 +395,29 @@ class WakeDispatcher:
                     adapter=adapter,
                 )
                 continue
+            if _is_continue_command(command):
+                # -c continues whatever session is latest in --cwd:
+                # waking a non-latest session (or one whose latest
+                # cannot be verified: missing store row cwd, busy
+                # store) would deliver the reply to the wrong
+                # conversation, so the wake stands down and the
+                # injection path still owns delivery
+                stored_cwd = str(row.get("cwd") or "")
+                latest = self._latest_session_in_cwd(stored_cwd)
+                if latest != session_id:
+                    self._decide(
+                        entry, "skipped",
+                        "wake skipped: session %s is not the latest"
+                        " in %s (latest %s), reply queued for"
+                        " next-boundary injection"
+                        % (session_id, stored_cwd or "(no cwd)",
+                           latest or "unknown"),
+                        adapter=adapter,
+                        reason="not the latest session in %s:"
+                        " latest is %s"
+                        % (stored_cwd or "(no cwd)", latest or "unknown"),
+                    )
+                    continue
             if len(self._inflight) >= max(1, self.config.wake.max_concurrent):
                 # transient: the cap frees up when a wake finishes, so
                 # this reply stays a candidate instead of being decided
@@ -447,6 +557,22 @@ class WakeDispatcher:
                     "duration_s": round(elapsed, 3),
                 }
             )
+            # the killed turn never consumed the reply: hand it back
+            # to the injection path instead of swallowing it
+            self._reopen_reply(wake["reply_id"])
+            self._journal(
+                {
+                    "event": "reopened",
+                    "reply_id": wake["reply_id"],
+                    "session_id": session_id,
+                    "adapter": wake["adapter"],
+                    "duration_s": round(elapsed, 3),
+                }
+            )
+            self.log(
+                "wake reply %s re-opened for next-boundary injection"
+                % wake["reply_id"]
+            )
             del self._inflight[session_id]
 
     def _finish(self, session_id, wake, code):
@@ -466,25 +592,46 @@ class WakeDispatcher:
                 "duration_s": round(duration, 3),
             }
         )
+        if code != 0:
+            # the failed turn never consumed the reply: hand it back
+            # to the injection path instead of swallowing it (code 0
+            # consumed it legitimately; that wake stands)
+            self._reopen_reply(wake["reply_id"])
+            self._journal(
+                {
+                    "event": "reopened",
+                    "reply_id": wake["reply_id"],
+                    "session_id": session_id,
+                    "adapter": wake["adapter"],
+                    "exit_code": code,
+                }
+            )
+            self.log(
+                "wake reply %s re-opened for next-boundary injection"
+                % wake["reply_id"]
+            )
 
     # -- decisions --
 
-    def _decide(self, entry, event, message, adapter=""):
+    def _decide(self, entry, event, message, adapter="", reason=None):
         """One terminal decision for a reply: journal it, log it, and
         mark the reply id decided. The reply itself stays unconsumed
-        so the injection path still owns delivery."""
+        so the injection path still owns delivery. reason, when set,
+        lands in the journal event so a skip is explainable from the
+        journal alone."""
         rid = entry["id"]
         self._seen.add(rid)
         self._deferred.discard(rid)
-        self._journal(
-            {
-                "event": event,
-                "reply_id": rid,
-                "reply_ts": str(entry.get("ts") or ""),
-                "session_id": str(entry.get("session_id") or ""),
-                "adapter": adapter,
-            }
-        )
+        record = {
+            "event": event,
+            "reply_id": rid,
+            "reply_ts": str(entry.get("ts") or ""),
+            "session_id": str(entry.get("session_id") or ""),
+            "adapter": adapter,
+        }
+        if reason is not None:
+            record["reason"] = reason
+        self._journal(record)
         self.log(message)
 
     # -- inputs --
@@ -551,6 +698,32 @@ class WakeDispatcher:
             "last_event": row[4],
         }
 
+    def _latest_session_in_cwd(self, cwd):
+        """The store's most recently seen session for a cwd, read-only;
+        None when the cwd is empty, the store is missing or busy, or
+        no session is known there (same probe posture as _session_row:
+        unverifiable means no wake)."""
+        if not cwd:
+            return None
+        if not os.path.exists(self.store_path):
+            return None
+        try:
+            uri = "file:%s?mode=ro" % urllib.request.pathname2url(self.store_path)
+            conn = sqlite3.connect(uri, uri=True, timeout=STORE_TIMEOUT_S)
+            try:
+                row = conn.execute(
+                    "SELECT session_id FROM sessions WHERE cwd = ?"
+                    " ORDER BY last_seen DESC, session_id DESC LIMIT 1",
+                    (cwd,),
+                ).fetchone()
+            finally:
+                conn.close()
+        except (OSError, ValueError, sqlite3.Error):
+            return None
+        if row is None:
+            return None
+        return str(row[0] or "")
+
     @staticmethod
     def _idle(row) -> bool:
         """A session looks idle when its last spooled event was a stop
@@ -594,6 +767,53 @@ class WakeDispatcher:
                             and not entry.get("consumed")
                         ):
                             entry["consumed"] = True
+                            line = (
+                                json.dumps(entry, separators=(",", ":")) + "\n"
+                            )
+                    out_lines.append(line)
+                if os.path.getsize(path) != size:
+                    continue  # an appender moved the journal; re-read
+                tmp = path + ".wake.tmp"
+                with open(tmp, "w", encoding="utf-8") as fh:
+                    fh.write("".join(out_lines))
+                    fh.flush()
+                    os.fsync(fh.fileno())
+                os.replace(tmp, path)
+                return
+            except OSError:
+                return
+
+    def _reopen_reply(self, rid):
+        """Flip consumed back to false for a woken reply whose turn
+        then failed or timed out, atomically.
+
+        Mirrors _mark_reply_consumed (the reply was consumed at
+        dispatch, so a dead turn must hand it back to the injection
+        path rather than silently swallowing it): same size re-check,
+        same two attempts, and a quiet give-up when the line moves
+        (worst case: the reply injects again next prompt)."""
+        path = self.replies_path
+        for _ in range(2):
+            try:
+                with open(path, "rb") as fh:
+                    raw = fh.read()
+                size = len(raw)
+                out_lines = []
+                for line in raw.decode("utf-8", "replace").splitlines(
+                    keepends=True
+                ):
+                    stripped = line.strip()
+                    if stripped:
+                        try:
+                            entry = json.loads(stripped)
+                        except ValueError:
+                            entry = None
+                        if (
+                            isinstance(entry, dict)
+                            and entry.get("id") == rid
+                            and entry.get("consumed")
+                        ):
+                            entry["consumed"] = False
                             line = (
                                 json.dumps(entry, separators=(",", ":")) + "\n"
                             )
