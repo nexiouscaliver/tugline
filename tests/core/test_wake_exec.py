@@ -17,6 +17,7 @@ never whatever node the host happens to have.
 
 import json
 import os
+import shlex
 import stat
 import subprocess
 
@@ -317,3 +318,145 @@ def test_default_spawn_passes_the_augmented_path_to_the_child(
     assert captured["stdout"] is subprocess.DEVNULL
     assert captured["stderr"] is subprocess.DEVNULL
     assert captured["stdin"] is subprocess.DEVNULL
+
+
+# -- the provider config bridge (zcode_runtime_env + _default_spawn) --
+
+
+def write_runtime_record(state_root, builtin, personal=None):
+    """A zcode-runtime.json as the zcode hook would write it."""
+    state_root.mkdir(parents=True, exist_ok=True)
+    record = {
+        "builtin_provider_config": builtin,
+        "personal_provider_config": personal,
+        "ts": "2026-10-15T07:00:00+00:00",
+    }
+    (state_root / "zcode-runtime.json").write_text(
+        json.dumps(record), encoding="utf-8"
+    )
+    return record
+
+
+def spawn_env_probe(tmp_path, runtime_env=None):
+    """Run a REAL _default_spawn of a tiny script that prints its
+    os.environ, and return the child's environment as a dict.
+
+    The spawn wires the child's stdout to DEVNULL by design, so the
+    probe script redirects its own env dump into a file under
+    tmp_path; the dump is still the child process's real inherited
+    environment, which is exactly what the bridge must reach."""
+    out = tmp_path / "child-env.txt"
+    proc = wake_mod._default_spawn(
+        ["/bin/sh", "-c", "env > %s" % shlex.quote(str(out))],
+        runtime_env=runtime_env,
+    )
+    assert proc.wait(timeout=30) == 0
+    child_env = {}
+    for line in out.read_text(encoding="utf-8").splitlines():
+        key, sep, value = line.partition("=")
+        if sep:
+            child_env[key] = value
+    return child_env
+
+
+def test_runtime_env_is_empty_without_a_record(tmp_path):
+    assert wake_mod.zcode_runtime_env(str(tmp_path / "state")) == {}
+
+
+def test_runtime_env_is_empty_for_a_broken_record(tmp_path):
+    state_root = tmp_path / "state"
+    state_root.mkdir()
+    (state_root / "zcode-runtime.json").write_text("{not json", encoding="utf-8")
+    assert wake_mod.zcode_runtime_env(str(state_root)) == {}
+
+
+def test_runtime_env_maps_present_non_null_keys_only(tmp_path):
+    state_root = tmp_path / "state"
+    write_runtime_record(
+        state_root,
+        "/opt/zcode/builtin-providers.json",
+        "/Users/shahil/.zcode/providers.json",
+    )
+    assert wake_mod.zcode_runtime_env(str(state_root)) == {
+        "ZCODE_BUILTIN_PROVIDER_CONFIG_FILE": "/opt/zcode/builtin-providers.json",
+        "ZCODE_PERSONAL_PROVIDER_CONFIG_FILE": "/Users/shahil/.zcode/providers.json",
+    }
+    # a null personal config is omitted, never sent as the string None
+    write_runtime_record(state_root, "/opt/zcode/builtin-providers.json", None)
+    assert wake_mod.zcode_runtime_env(str(state_root)) == {
+        "ZCODE_BUILTIN_PROVIDER_CONFIG_FILE": "/opt/zcode/builtin-providers.json"
+    }
+
+
+def test_real_default_spawn_merges_the_recorded_provider_env(
+    tmp_path, monkeypatch
+):
+    # daemon-like: os.environ carries neither provider var, the hook's
+    # record carries both, and the real child must see the merged values
+    monkeypatch.delenv("ZCODE_BUILTIN_PROVIDER_CONFIG_FILE", raising=False)
+    monkeypatch.delenv("ZCODE_PERSONAL_PROVIDER_CONFIG_FILE", raising=False)
+    state_root = tmp_path / "state"
+    write_runtime_record(
+        state_root,
+        "/opt/zcode/builtin-providers.json",
+        "/Users/shahil/.zcode/providers.json",
+    )
+
+    child_env = spawn_env_probe(
+        tmp_path, runtime_env=wake_mod.zcode_runtime_env(str(state_root))
+    )
+
+    assert child_env["ZCODE_BUILTIN_PROVIDER_CONFIG_FILE"] == (
+        "/opt/zcode/builtin-providers.json"
+    )
+    assert child_env["ZCODE_PERSONAL_PROVIDER_CONFIG_FILE"] == (
+        "/Users/shahil/.zcode/providers.json"
+    )
+
+
+def test_inherited_environ_value_wins_over_the_record(tmp_path, monkeypatch):
+    # setdefault semantics: when the daemon's own environment already
+    # carries the var, the (possibly stale) record must not overwrite it
+    monkeypatch.setenv(
+        "ZCODE_BUILTIN_PROVIDER_CONFIG_FILE", "/from/daemon/environ"
+    )
+    state_root = tmp_path / "state"
+    write_runtime_record(state_root, "/from/the/record")
+
+    child_env = spawn_env_probe(
+        tmp_path, runtime_env=wake_mod.zcode_runtime_env(str(state_root))
+    )
+
+    assert child_env["ZCODE_BUILTIN_PROVIDER_CONFIG_FILE"] == (
+        "/from/daemon/environ"
+    )
+
+
+def test_dispatcher_default_spawn_reads_the_record_at_call_time(
+    tmp_path, monkeypatch
+):
+    # a long-lived daemon must see fresh records, not one snapshot
+    # taken at construction: the record lands AFTER the dispatcher
+    # exists and the default spawn still picks it up. The provider
+    # vars are stripped first because setdefault semantics let an
+    # inherited value (this test process may itself run inside the
+    # app) win over the record.
+    monkeypatch.delenv("ZCODE_BUILTIN_PROVIDER_CONFIG_FILE", raising=False)
+    monkeypatch.delenv("ZCODE_PERSONAL_PROVIDER_CONFIG_FILE", raising=False)
+    state_root = tmp_path / "state"  # what make_dispatcher wires in
+    state_root.mkdir()
+    captured = {}
+
+    def fake_popen(argv, **kwargs):
+        captured.update(kwargs)
+        return FakeProc()
+
+    monkeypatch.setattr(wake_mod.subprocess, "Popen", fake_popen)
+    dispatcher = make_dispatcher(tmp_path)  # no spawn: the default path
+
+    write_runtime_record(state_root, "/written/after/construction.json")
+    dispatcher._spawn(["/usr/bin/true"])
+
+    assert captured["env"]["ZCODE_BUILTIN_PROVIDER_CONFIG_FILE"] == (
+        "/written/after/construction.json"
+    )

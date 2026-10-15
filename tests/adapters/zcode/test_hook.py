@@ -422,3 +422,61 @@ def test_stdin_read_ceiling_returns_without_data(tmp_path):
     finally:
         _os.close(w)
     assert text == ""
+
+
+# -- provider config env recording (the daemon-side wake bridge) --
+
+
+def test_hook_records_the_app_injected_provider_config_env(
+    home, config_path, monkeypatch
+):
+    # the hook runs inside app sessions, where the injected provider
+    # config variables live; it must snapshot both values plus a ts
+    # so the daemon-side wake spawn can merge them back in
+    monkeypatch.setenv(
+        "ZCODE_BUILTIN_PROVIDER_CONFIG_FILE", "/opt/zcode/builtin-providers.json"
+    )
+    monkeypatch.setenv(
+        "ZCODE_PERSONAL_PROVIDER_CONFIG_FILE", "/Users/shahil/.zcode/providers.json"
+    )
+    code = run_hook(
+        "SessionStart",
+        '{"hookEventName":"SessionStart","source":"resume","sessionId":"s-rt"}',
+        config_path=config_path,
+        home=home,
+    )
+    assert code == 0
+    record = json.loads(
+        (home / "state" / "zcode-runtime.json").read_text(encoding="utf-8")
+    )
+    assert record["builtin_provider_config"] == "/opt/zcode/builtin-providers.json"
+    assert (
+        record["personal_provider_config"] == "/Users/shahil/.zcode/providers.json"
+    )
+    assert record["ts"]
+
+
+def test_hook_without_the_builtin_var_never_touches_an_existing_record(
+    home, config_path, monkeypatch
+):
+    # a non-app context (no builtin var) must not clobber the last
+    # good record with nulls or garbage
+    monkeypatch.delenv("ZCODE_BUILTIN_PROVIDER_CONFIG_FILE", raising=False)
+    good = {
+        "builtin_provider_config": "/opt/zcode/builtin-providers.json",
+        "personal_provider_config": None,
+        "ts": "2026-10-15T00:00:00+00:00",
+    }
+    state = home / "state"
+    state.mkdir(parents=True)
+    (state / "zcode-runtime.json").write_text(json.dumps(good), encoding="utf-8")
+    code = run_hook(
+        "SessionStart",
+        '{"hookEventName":"SessionStart","source":"resume","sessionId":"s-rt2"}',
+        config_path=config_path,
+        home=home,
+    )
+    assert code == 0
+    assert json.loads(
+        (state / "zcode-runtime.json").read_text(encoding="utf-8")
+    ) == good
