@@ -272,6 +272,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Woken sessions can run their tugline hooks again: the spawn PATH
+  now also carries the directory of the running tug executable (the
+  uv tool venv bin dir, which neither the launchd daemon PATH nor
+  the extra exec roots include), so the hooks' bare
+  `tug hook-zcode <Event>` command resolves to the same binary the
+  daemon runs instead of failing (core.hooks hook.run.failed) and
+  leaving the woken turn store-silent: no session events, no
+  response preview, no stop buzz. PATH entries are deduplicated,
+  first occurrence wins.
 - Store reads now serialize on the same lock as writes. The store
   shares one sqlite connection across threads, and reads skipped the
   lock, so an ingest-thread write interleaved with a request-thread
