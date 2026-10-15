@@ -272,6 +272,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Store reads now serialize on the same lock as writes. The store
+  shares one sqlite connection across threads, and reads skipped the
+  lock, so an ingest-thread write interleaved with a request-thread
+  read cursor and the sqlite3.Row objects arrived shaped for the
+  wrong statement: intermittent IndexError ("tuple index out of
+  range") in console listings, reproduced 5 times in a 20s local
+  stress with 1 ingest writer and 6 readers, and the flake class
+  behind three console CI failures. Every connection use, read or
+  write, now runs while holding the one store lock (WAL cannot help
+  here: it isolates connections from each other, not threads
+  stepping one shared connection).
+
 - Daemon-context zcode wakes no longer die on the missing provider
   config: the zcode app injects ZCODE_BUILTIN_PROVIDER_CONFIG_FILE
   (and the personal variant) into its child processes, but the
