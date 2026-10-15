@@ -643,7 +643,7 @@ def test_version_four_store_migrates_identity_in_place(tmp_path):
     version = store.conn.execute(
         "SELECT value FROM meta WHERE key = 'schema_version'"
     ).fetchone()[0]
-    assert version == "6"
+    assert version == "7"
     row = session_row(store, "sess-old")
     assert row["label"] == "old label"  # v4 labels ride over untouched
     assert row["label_source"] is None  # and read as not operator-set
@@ -665,7 +665,7 @@ def test_fresh_store_is_schema_version_five(tmp_path):
     version = store.conn.execute(
         "SELECT value FROM meta WHERE key = 'schema_version'"
     ).fetchone()[0]
-    assert version == "6"
+    assert version == "7"
     session_cols = {
         r[1] for r in store.conn.execute("PRAGMA table_info(sessions)")
     }
@@ -702,5 +702,5 @@ def test_concurrent_opens_migrate_exactly_once(tmp_path):
     version = store.conn.execute(
         "SELECT value FROM meta WHERE key = 'schema_version'"
     ).fetchone()[0]
-    assert version == "6"
+    assert version == "7"
     store.close()

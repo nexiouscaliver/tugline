@@ -20,6 +20,7 @@ import os
 import shlex
 import stat
 import subprocess
+import sys
 
 from tugline.core import config as cfg
 from tugline.core import spool
@@ -161,6 +162,17 @@ def empty_dir(parent, sub="empty"):
     return d
 
 
+def pin_executable_dir(tmp_path, monkeypatch, sub="venv-bin"):
+    """Monkeypatch sys.executable so its parent is an empty tmp dir,
+    and return that dir: the augmented PATH now includes the running
+    executable's directory, so PATH assertions and bare-name lookups
+    must never depend on the real venv this pytest happens to run
+    from (whose bin dir could shadow a fixture or shift a string)."""
+    bindir = empty_dir(tmp_path, sub=sub)
+    monkeypatch.setattr(sys, "executable", str(bindir / "python"))
+    return bindir
+
+
 # -- resolve_executable: the pure function --
 
 
@@ -181,6 +193,7 @@ def test_resolve_finds_a_bare_name_via_extra_roots_when_path_is_empty(
     # launchd-like: the env PATH knows nothing about the driver, the
     # extra roots carry it (the W13 production fix)
     bindir = make_node_dir(tmp_path)
+    pin_executable_dir(tmp_path, monkeypatch)  # real venv stays out
     monkeypatch.setattr(wake_mod, "EXTRA_EXEC_PATHS", [str(bindir)])
 
     resolved = resolve_executable(["node", "-v"], env={"PATH": ""})
@@ -202,6 +215,7 @@ def test_unresolvable_bare_name_returns_argv_unchanged(
     tmp_path, monkeypatch
 ):
     nowhere = empty_dir(tmp_path)
+    pin_executable_dir(tmp_path, monkeypatch)  # real venv stays out
     monkeypatch.setattr(wake_mod, "EXTRA_EXEC_PATHS", [str(nowhere)])
     argv = ["node", "-v"]
 
@@ -222,6 +236,7 @@ def test_real_dispatch_spawns_the_resolved_absolute_path(
     # do, and the spawn must receive the absolute path or die with
     # "[Errno 2] No such file or directory: 'node'"
     extra = make_node_dir(tmp_path, sub="extra-roots")
+    pin_executable_dir(tmp_path, monkeypatch)  # real venv stays out
     monkeypatch.setenv("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
     monkeypatch.setattr(wake_mod, "EXTRA_EXEC_PATHS", [str(extra)])
     seed_store(tmp_path)
@@ -267,6 +282,7 @@ def test_dry_run_flags_and_warns_when_driver_is_unresolvable(
 ):
     # a dry run is a preflight: it must say when the dispatch it
     # previews would die on spawn
+    pin_executable_dir(tmp_path, monkeypatch)  # real venv stays out
     monkeypatch.setenv("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
     monkeypatch.setattr(wake_mod, "EXTRA_EXEC_PATHS", [])
     seed_store(tmp_path)
@@ -296,10 +312,11 @@ def test_default_spawn_passes_the_augmented_path_to_the_child(
     tmp_path, monkeypatch
 ):
     # fixing argv[0] alone would push the launchd gap one process
-    # later: node's own children need a PATH that can find things
-    # (the tug bin dirs carry their own coverage below)
+    # later: node's own children need a PATH that can find things,
+    # and the child's own tugline hooks need one that finds tug
     on_path = make_node_dir(tmp_path, sub="on-path")
     extra = make_node_dir(tmp_path, sub="extra-roots")
+    exe_dir = pin_executable_dir(tmp_path, monkeypatch)
     monkeypatch.setenv("PATH", str(on_path))
     monkeypatch.setattr(wake_mod, "EXTRA_EXEC_PATHS", [str(extra)])
     monkeypatch.setattr(wake_mod, "tug_bin_dirs", lambda: [])
@@ -316,7 +333,11 @@ def test_default_spawn_passes_the_augmented_path_to_the_child(
 
     env = captured["env"]
     assert env is not os.environ  # a copy, not a mutation of the daemon's
-    assert env["PATH"] == os.pathsep.join([str(on_path), str(extra)])
+    # env PATH first, then the running executable's dir (the woken
+    # session's hooks resolve tug there, W16), then the extra roots
+    assert env["PATH"] == os.pathsep.join(
+        [str(on_path), str(exe_dir), str(extra)]
+    )
     assert captured["stdout"] is subprocess.DEVNULL
     assert captured["stderr"] is subprocess.DEVNULL
     assert captured["stdin"] is subprocess.DEVNULL
@@ -362,7 +383,11 @@ def test_augmented_path_carries_the_tug_bin_dirs(tmp_path,
 
     path = wake_mod._augmented_path({"PATH": "/usr/bin:/bin"})
 
-    assert path == "/usr/bin:/bin" + os.pathsep + str(tugdir)
+    components = path.split(os.pathsep)
+    # the union carries the running executable's dir too (main's W16),
+    # so assert membership and order rather than an exact string
+    assert components[:2] == ["/usr/bin", "/bin"]
+    assert str(tugdir) in components
 
 
 def test_default_spawn_env_includes_the_tug_bin_dir(tmp_path,
@@ -382,6 +407,63 @@ def test_default_spawn_env_includes_the_tug_bin_dir(tmp_path,
     wake_mod._default_spawn(["/usr/bin/true"])
 
     assert captured["env"]["PATH"].endswith(os.pathsep + str(tugdir))
+
+# -- the spawn PATH carries the running tug executable's dir (W16) --
+
+
+def test_augmented_path_contains_the_running_executables_dir(
+    tmp_path, monkeypatch
+):
+    # the W16 production fact: tug lives in the uv tool venv bin dir
+    # (the daemon executable's own dir), which no launchd PATH or
+    # extra root contains; the default extra roots stay in play
+    exe_dir = pin_executable_dir(tmp_path, monkeypatch)
+
+    path = wake_mod._augmented_path(env={"PATH": "/usr/bin:/bin"})
+    parts = path.split(os.pathsep)
+
+    assert str(exe_dir) in parts
+    for root in wake_mod.EXTRA_EXEC_PATHS:
+        assert root in parts
+    # env PATH still leads: an inherited entry always wins the lookup
+    assert parts[:2] == ["/usr/bin", "/bin"]
+
+
+def test_augmented_path_dedupes_the_executables_dir_keep_first(
+    tmp_path, monkeypatch
+):
+    # sys.executable's dir arriving twice (once inside env PATH, once
+    # as the running executable's own contribution) must collapse to
+    # its first occurrence: a dup never reorders search precedence
+    exe_dir = pin_executable_dir(tmp_path, monkeypatch)
+    doubled = os.pathsep.join([str(exe_dir), "/usr/bin", str(exe_dir)])
+
+    parts = wake_mod._augmented_path(env={"PATH": doubled}).split(os.pathsep)
+
+    assert parts.count(str(exe_dir)) == 1
+    assert parts[0] == str(exe_dir)  # the first occurrence is the one kept
+    assert len(parts) == len(set(parts))  # nothing else duplicated either
+
+
+def test_spawned_child_resolves_tug_from_the_running_executables_dir(
+    tmp_path, monkeypatch
+):
+    # end to end against the real spawn: a daemon-like stripped PATH,
+    # no extra roots, a fake tug sitting in the (fake) venv bin dir
+    # the daemon's own python lives in; the child must resolve "tug"
+    # there or the woken session's hooks all die (W16's bug)
+    bindir = make_node_dir(tmp_path, sub="tugline-tool-bin", name="tug")
+    monkeypatch.setattr(sys, "executable", str(bindir / "python"))
+    monkeypatch.setenv("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
+    monkeypatch.setattr(wake_mod, "EXTRA_EXEC_PATHS", [])
+    out = tmp_path / "tug-resolved.txt"
+
+    proc = wake_mod._default_spawn(
+        ["/bin/sh", "-c", "command -v tug > %s" % shlex.quote(str(out))]
+    )
+
+    assert proc.wait(timeout=30) == 0
+    assert out.read_text(encoding="utf-8").strip() == str(bindir / "tug")
 
 
 # -- the provider config bridge (zcode_runtime_env + _default_spawn) --

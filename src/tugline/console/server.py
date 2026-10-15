@@ -314,7 +314,10 @@ class ConsoleServer:
             return 200, {"events": self.store.events(limit=limit, session_id=session)}
         if name == "threads" and len(segments) == 2:
             status = (query.get("status") or [None])[0]
-            return 200, {"threads": self.store.threads(status=status)}
+            return 200, {
+                "threads": self._threads_view(status=status),
+                "approve_on": self._approve_on(),
+            }
         if name == "replies" and len(segments) == 2:
             limit = _int_param(query, "limit", 50)
             if limit is None:
@@ -579,6 +582,53 @@ class ConsoleServer:
 
     # -- state and replies.jsonl --
 
+    def _approve_on(self) -> bool:
+        """The [toggles] approve posture the console renders against.
+
+        Read per call so a config reload is picked up without a
+        restart; the fallback (None when the config carries no such
+        toggle) reads as off, the fail-closed direction.
+        """
+        return bool(getattr(self.config.toggles, "approve", False))
+
+    def _threads_view(self, status=None) -> list:
+        """Thread rows dressed for the asks section, one source of
+        truth.
+
+        Every row carries its session's identity straight from the
+        session rows (label, tags, the one-rule display_id, adapter,
+        project), so the section renders from this read alone instead
+        of stitching the sessions panel's in-memory map. Permission
+        rows (W10-L24) also carry honest decidability: they have no
+        decision-file target, so decidable is false and the note says
+        where the answer really goes; approve and ask rows stay
+        decidable (their endpoints enforce the rest). The same view
+        serves GET /api/threads and the /api/state snapshot, so the
+        section can never see two shapes.
+        """
+        rows = self.store.threads(status=status)
+        by_sid = {s.get("session_id"): s for s in self.store.sessions()}
+        approve_on = self._approve_on()
+        for row in rows:
+            session = by_sid.get(row.get("session_id") or "") or {}
+            row["label"] = session.get("label")
+            row["tags"] = session.get("tags") or []
+            row["display_id"] = (
+                session.get("display_id") or row.get("session_id") or ""
+            )
+            row["adapter"] = session.get("adapter") or ""
+            row["project"] = session.get("project") or ""
+            if row.get("kind") == "permission":
+                row["decidable"] = False
+                row["decidable_note"] = (
+                    "answer in the harness"
+                    if approve_on
+                    else "approve is off - answer in the harness"
+                )
+            else:
+                row["decidable"] = True
+        return rows
+
     def _sessions_view(self):
         """Raw store rows dressed for display: honest liveness state,
         collision-proof ids, active-now rows first."""
@@ -586,9 +636,14 @@ class ConsoleServer:
 
     def state_payload(self):
         """One read for a console render: the store snapshot plus
-        health, spool depth, and when the ingest last ran."""
+        health, spool depth, and when the ingest last ran. The
+        snapshot's threads ride through the same dressed view as
+        GET /api/threads (identity fields, decidability), and
+        approve_on tells the page which decision flow is live."""
         payload = self.store.snapshot()
         payload["sessions"] = decorate_sessions(payload["sessions"])
+        payload["threads"] = self._threads_view()
+        payload["approve_on"] = self._approve_on()
         health = daemon_health(self.spool_root)
         health["ntfy"] = ntfy_health(self.config)
         payload["health"] = health

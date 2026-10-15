@@ -45,6 +45,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Permission asks in the console, mobile and desktop: the store now
+  threads every permissionrequest it ingests (kind "permission", one
+  per session, refreshed by each new ask) regardless of the approve
+  toggle, so harness permission prompts (zcode workflow
+  confirmations, tool permissions) are finally visible in the asks
+  section while the toggle is off; the toggle governs the phone
+  decision buttons, not read-side visibility. The card shows the
+  question, the tool, the session identity (label, adapter and
+  project badges), a waiting chip while the session still sits on
+  the prompt, and the honest note ("approve is off - answer in the
+  harness") instead of decision buttons no file backs; the reply
+  link stays as the one console action. When the harness moves on
+  (any later event for the session) the thread settles as gone,
+  keeping its question and timestamp, and a schema v7 migration
+  backfills the same one-per-session threads for permissionrequests
+  a console already ingested before this change (open when the
+  permissionrequest is still the session's newest event, gone
+  otherwise).
+
+- Asks section stability: thread rows now carry their own identity
+  fields (label, tags, collision-proof display_id, adapter, project)
+  and a decidable flag, served by one server-side view through both
+  GET /api/threads and the SSE snapshot, so the section renders from
+  one source of truth instead of stitching names from the sessions
+  list. The stream (re)opening refetches the section, so a reconnect
+  repaints instead of leaving a stale list; a failed fetch shows an
+  inline error line instead of a silent blank; option and decision
+  buttons keep 44-48px targets with taps stopped from bubbling, and
+  buttons use touch-action manipulation so a fast second tap is
+  never eaten by double-tap zoom.
+
 - Ask cards in the console, mobile and desktop: open `tug ask`
   threads render as question cards under the approval cards, the
   question text in full and each lettered option a full-width
@@ -307,6 +338,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   token file.
 
 ### Fixed
+
+- Woken sessions can run their tugline hooks again: the spawn PATH
+  now also carries the directory of the running tug executable (the
+  uv tool venv bin dir, which neither the launchd daemon PATH nor
+  the extra exec roots include), so the hooks' bare
+  `tug hook-zcode <Event>` command resolves to the same binary the
+  daemon runs instead of failing (core.hooks hook.run.failed) and
+  leaving the woken turn store-silent: no session events, no
+  response preview, no stop buzz. PATH entries are deduplicated,
+  first occurrence wins.
+- Store reads now serialize on the same lock as writes. The store
+  shares one sqlite connection across threads, and reads skipped the
+  lock, so an ingest-thread write interleaved with a request-thread
+  read cursor and the sqlite3.Row objects arrived shaped for the
+  wrong statement: intermittent IndexError ("tuple index out of
+  range") in console listings, reproduced 5 times in a 20s local
+  stress with 1 ingest writer and 6 readers, and the flake class
+  behind three console CI failures. Every connection use, read or
+  write, now runs while holding the one store lock (WAL cannot help
+  here: it isolates connections from each other, not threads
+  stepping one shared connection).
 
 - Daemon-context zcode wakes no longer die on the missing provider
   config: the zcode app injects ZCODE_BUILTIN_PROVIDER_CONFIG_FILE
