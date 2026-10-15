@@ -59,7 +59,7 @@ def test_schema_version_five_and_tables_created(tmp_path):
     version = store.conn.execute(
         "SELECT value FROM meta WHERE key = 'schema_version'"
     ).fetchone()[0]
-    assert version == "6"
+    assert version == "7"
     names = {
         row[0]
         for row in store.conn.execute(
@@ -92,7 +92,7 @@ def test_version_one_store_migrates_events_columns(tmp_path):
     version = store.conn.execute(
         "SELECT value FROM meta WHERE key = 'schema_version'"
     ).fetchone()[0]
-    assert version == "6"
+    assert version == "7"
     event_cols = {
         row[1] for row in store.conn.execute("PRAGMA table_info(events)")
     }
@@ -122,7 +122,7 @@ def test_version_four_store_migrates_response_preview(tmp_path):
     version = store.conn.execute(
         "SELECT value FROM meta WHERE key = 'schema_version'"
     ).fetchone()[0]
-    assert version == "6"
+    assert version == "7"
     event_cols = {
         row[1] for row in store.conn.execute("PRAGMA table_info(events)")
     }
@@ -544,12 +544,36 @@ def test_permissionrequest_with_actions_creates_thread(tmp_path):
     store.close()
 
 
-def test_permissionrequest_without_actions_makes_no_thread(tmp_path):
+def test_permissionrequest_without_actions_makes_permission_thread(tmp_path):
+    # W10-L24: read-side visibility never depends on the approve
+    # toggle. A permissionrequest with no action urls (the shape the
+    # hooks spool when [toggles] approve is off) still threads, as
+    # kind=permission, bound to the session, retired to "gone" by any
+    # later event for that session (see test below and
+    # tests/console/test_permission_asks.py for the full contract).
     spool_root = tmp_path / "spool"
     write(spool_root, now=WHEN, event="permissionrequest")
     store = open_store(tmp_path)
-    assert store.ingest_spool(str(spool_root))["threads"] == 0
-    assert store.threads() == []
+    counts = store.ingest_spool(str(spool_root))
+    assert counts["threads"] == 1
+    thread = [t for t in store.threads() if t["kind"] == "permission"][0]
+    assert thread["session_id"] == "s1"
+    assert thread["status"] == "open"
+    store.ingest_spool(str(spool_root))
+    assert len(store.threads()) == 1
+    store.close()
+
+
+def test_permission_thread_goes_gone_on_a_later_event(tmp_path):
+    spool_root = tmp_path / "spool"
+    write(spool_root, now=WHEN, event="permissionrequest")
+    write(spool_root, now=LATER, event="stop")
+    store = open_store(tmp_path)
+    counts = store.ingest_spool(str(spool_root))
+    assert counts["threads"] == 1
+    assert counts["gone"] == 1
+    thread = [t for t in store.threads() if t["kind"] == "permission"][0]
+    assert thread["status"] == "gone"
     store.close()
 
 

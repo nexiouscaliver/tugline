@@ -29,7 +29,14 @@ that log into tables a console can query in one place:
   under the approvals root. Ask threads (W9-L21) live in the same
   table with kind "ask": created by the tug ask command with their
   options as JSON in the options column, answered by any of the ask
-  paths, expired by the timeout.
+  paths, expired by the timeout. Permission threads (W10-L24) live
+  here too with kind "permission": one per session, created or
+  refreshed by every permissionrequest the spool carries regardless
+  of the approve toggle (read-side visibility never depends on the
+  decision-button flow), with a deterministic nonce derived from the
+  session id. Their status comes from the event flow, not files: any
+  later event for the session flips an open permission thread to
+  "gone" (the harness moved on); refresh_threads never touches them.
 - replies: rows the console writes back toward sessions and threads;
   delivering them is a later concern, so delivered stays 0.
 
@@ -171,6 +178,32 @@ MIGRATIONS = [
         """
         ALTER TABLE sessions ADD COLUMN label_source TEXT;
         ALTER TABLE threads ADD COLUMN options TEXT;
+        """,
+    ),
+    (
+        7,
+        """
+        INSERT INTO threads (nonce, session_id, kind, title, body,
+                             created_ts, status)
+        SELECT 'perm-' || e.session_id, e.session_id, 'permission',
+               e.title, e.body, e.ts,
+               CASE WHEN NOT EXISTS (
+                   SELECT 1 FROM events e4 WHERE e4.session_id = e.session_id
+                   AND (e4.ts > e.ts OR (e4.ts = e.ts AND e4.id > e.id))
+               ) THEN 'open' ELSE 'gone' END
+        FROM events e
+        JOIN sessions s ON s.session_id = e.session_id
+        WHERE e.session_id != ''
+          AND LOWER(e.event) = 'permissionrequest'
+          AND NOT EXISTS (
+              SELECT 1 FROM events e3 WHERE e3.session_id = e.session_id
+              AND LOWER(e3.event) = 'permissionrequest'
+              AND (e3.ts > e.ts OR (e3.ts = e.ts AND e3.id > e.id))
+          )
+          AND NOT EXISTS (
+              SELECT 1 FROM threads t WHERE t.session_id = e.session_id
+              AND t.kind IN ('approve', 'permission')
+          );
         """,
     ),
 ]
@@ -380,6 +413,19 @@ def _approval_nonce(record) -> str:
     return ""
 
 
+def permission_nonce(session_id) -> str:
+    """The deterministic kind=permission thread nonce for one session.
+
+    One permission thread per session, refreshed in place by each new
+    permissionrequest: the nonce is stable for the session id, so a
+    refresh finds the row and a re-ingest never duplicates it. The id
+    itself (not a hash) so the v7 backfill migration can compute the
+    same nonce in plain SQL; session ids are unique, so "perm-" + id
+    cannot collide across sessions or with approve and ask nonces.
+    """
+    return "perm-" + str(session_id)
+
+
 def _read_decision(path):
     """{"decision", "ts"} from a receiver decision file, else None."""
     try:
@@ -518,9 +564,13 @@ class Store:
         Walks day files oldest first (spool.records, read-only) and
         skips ids already stored, so re-running over the same spool
         returns zeros and changes nothing. Returns counts of new rows
-        only: {"events", "sessions", "threads"}.
+        only: {"events", "sessions", "threads"}, plus "gone" (count of
+        open permission threads retired to gone this pass) when at
+        least one flipped, so a listener can tell a threads repaint is
+        due without any new row existing.
         """
         counts = {"events": 0, "sessions": 0, "threads": 0}
+        gone = 0
         with self._lock:
             self.conn.execute("BEGIN IMMEDIATE")
             try:
@@ -540,25 +590,52 @@ class Store:
                     ts = str(rec.get("ts") or "")
                     session_id = str(rec.get("session_id") or "")
                     event = str(rec.get("event") or "")
+                    name = event.strip().lower()
                     if session_id and self._upsert_session(
                         session_id, event, ts, rec
                     ):
                         counts["sessions"] += 1
-                    if session_id and event.strip().lower() == (
-                        "userpromptsubmit"
-                    ):
+                    if session_id and name == "userpromptsubmit":
                         self._maybe_auto_label(session_id, rec)
-                    nonce = _approval_nonce(rec)
-                    if (
-                        event.strip().lower() == "permissionrequest"
-                        and nonce
-                        and self._insert_thread(nonce, session_id, rec, ts)
-                    ):
-                        counts["threads"] += 1
+                    if session_id and name == "permissionrequest":
+                        # W10-L24: a permissionrequest threads ALWAYS.
+                        # With an approvals url it is the approve-gated
+                        # kind (buttons, decision files); without one,
+                        # the shape every hook spools while the approve
+                        # toggle is off, it still threads as
+                        # kind=permission so the console asks section
+                        # can show it. The toggle governs the decision
+                        # flow, not read-side visibility.
+                        nonce = _approval_nonce(rec)
+                        if nonce:
+                            if self._insert_thread(
+                                nonce, session_id, rec, ts
+                            ):
+                                counts["threads"] += 1
+                            # the approve-gated ask supersedes the plain
+                            # permission thread (the toggle flipped on
+                            # mid-session); retire it like any other
+                            # later event would
+                            gone += self._retire_permission_threads(
+                                session_id, ts
+                            )
+                        elif self._upsert_permission_thread(
+                            session_id, rec, ts
+                        ):
+                            counts["threads"] += 1
+                    elif session_id:
+                        # any other event means the harness moved past
+                        # the permission point: open permission threads
+                        # for this session are gone
+                        gone += self._retire_permission_threads(
+                            session_id, ts
+                        )
                 self.conn.execute("COMMIT")
             except BaseException:
                 self.conn.execute("ROLLBACK")
                 raise
+        if gone:
+            counts["gone"] = gone
         return counts
 
     def _insert_event(self, rec, rid):
@@ -671,6 +748,67 @@ class Store:
             ),
         )
         return True
+
+    def _upsert_permission_thread(self, session_id, rec, ts) -> bool:
+        """Create or refresh the session's kind=permission thread.
+
+        One row per session (the deterministic permission nonce): the
+        first permissionrequest opens it, a later one refreshes it in
+        place, the newest question winning, even after the thread went
+        gone (the harness asked again). True when the row was created
+        or changed, so ingest counts a repaint-worthy touch.
+
+        Caller holds the ingest write transaction.
+        """
+        nonce = permission_nonce(session_id)
+        title = str(rec.get("title") or "")
+        body = str(rec.get("body") or "")
+        row = self.conn.execute(
+            "SELECT status, title, body, created_ts FROM threads"
+            " WHERE nonce = ?",
+            (nonce,),
+        ).fetchone()
+        if row is None:
+            self.conn.execute(
+                "INSERT INTO threads (nonce, session_id, kind, title,"
+                " body, created_ts) VALUES (?, ?, 'permission', ?, ?, ?)",
+                (nonce, session_id, title, body, ts),
+            )
+            return True
+        if (
+            row["status"] == "open"
+            and row["title"] == title
+            and row["body"] == body
+            and row["created_ts"] == ts
+        ):
+            return False
+        self.conn.execute(
+            "UPDATE threads SET status = 'open', title = ?, body = ?,"
+            " created_ts = ?, answer = NULL, answer_ts = NULL"
+            " WHERE nonce = ?",
+            (title, body, ts, nonce),
+        )
+        return True
+
+    def _retire_permission_threads(self, session_id, ts) -> int:
+        """Flip the session's open permission threads to gone.
+
+        Any later event for the session means the harness moved past
+        the permission point (the inline hook blocks the session while
+        it waits, so nothing else can interleave): the thread keeps
+        its question and timestamp and reads gone. Only threads at or
+        before the event's timestamp flip, so a late-arriving older
+        record cannot rewrite history. Returns how many rows flipped.
+
+        Caller holds the ingest write transaction.
+        """
+        cur = self.conn.execute(
+            "UPDATE threads SET status = 'gone'"
+            " WHERE session_id = ? AND kind = 'permission'"
+            " AND status = 'open' AND created_ts <= ?",
+            (session_id, ts),
+        )
+        return int(cur.rowcount or 0)
 
     # -- session auto-identity (W9-L21), all inside the ingest
     # transaction --
@@ -905,9 +1043,12 @@ class Store:
         For every thread not yet answered: a parseable decision file
         marks it answered (answer and answer_ts from the file), a
         pending marker keeps it open, and neither file means the ask
-        went away unanswered (expired). Returns counts of rows whose
-        status changed, so a refresh that changes nothing returns
-        zeros.
+        went away unanswered (expired). Permission threads are none of
+        the file flow's business: they carry no nonce the receiver
+        ever registered, so they would all read expired here while
+        their real status comes from the event flow (see ingest_spool).
+        Returns counts of rows whose status changed, so a refresh that
+        changes nothing returns zeros.
         """
         root = str(approvals_root)
         counts = {"answered": 0, "open": 0, "expired": 0}
@@ -918,7 +1059,8 @@ class Store:
         with self._lock:
             rows = self.conn.execute(
                 "SELECT nonce, status FROM threads"
-                " WHERE status != 'answered' AND kind != 'ask'"
+                " WHERE status != 'answered' AND kind NOT IN ('ask',"
+                " 'permission')"
             ).fetchall()
             updates = []
             for row in rows:

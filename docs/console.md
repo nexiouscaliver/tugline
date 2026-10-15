@@ -87,6 +87,30 @@ they happened.
   a failure shows an inline error and re-enables them, and the
   settled list shows the chosen letter in green (see Asking
   questions below).
+- Permission asks: a harness permission prompt (a zcode workflow
+  confirmation, a tool permission) renders as a waiting card even
+  while the approve toggle is off, because the store threads every
+  permissionrequest it ingests, with or without action buttons; the
+  toggle governs the phone decision buttons, never what the page can
+  see. The card carries the session identity (label, adapter and
+  project badges), the tool, the question in full, a waiting chip
+  while the session still sits on the prompt, and its age. When the
+  harness moves on (any later event for the session) the thread
+  settles as gone, keeping its question and timestamp. The card has
+  no Approve or Deny buttons, because with the toggle off no
+  decision file exists to write: it shows the plain note "approve is
+  off - answer in the harness" instead, and the reply link stays as
+  the one honest console action (a reply through the thread binding,
+  injected at the session's next prompt boundary).
+- Section truth: the asks panel renders from one source of truth,
+  thread rows that carry their own identity fields (label, tags,
+  collision-proof `display_id`, adapter, project) and a `decidable`
+  flag with its note. Both `GET /api/threads` and the SSE snapshot
+  serve the same server-side view, so the panel never stitches names
+  from the sessions list. The stream (re)opening refetches the
+  section, so a reconnect repaints instead of leaving a stale list;
+  a failed fetch shows an inline error line, and the empty state
+  says no open asks rather than leaving the panel blank.
 - Reply: a text box with an explicit target line: reply to session
   <name> (label first, short id second, so you always see exactly
   where it goes), reply via thread <id>, or no target selected. Pick
@@ -170,10 +194,10 @@ Security below).
 | Method and path | What it does |
 | --- | --- |
 | GET `/` | the console page |
-| GET `/api/state` | one render in one read: sessions (decorated with `display_state` and a collision-proof `display_id`, active-now first, each with its `tags`), the last 50 events, threads, the last 20 replies, headline counts, health, spool depth, last ingest time |
+| GET `/api/state` | one render in one read: sessions (decorated with `display_state` and a collision-proof `display_id`, active-now first, each with its `tags`), the last 50 events, threads (the same dressed view as `/api/threads`: identity fields, `decidable`), the last 20 replies, headline counts, health, spool depth, last ingest time, `approve_on` |
 | GET `/api/sessions` | all sessions with the same decoration, `tags`, and ordering as `/api/state` |
 | GET `/api/events?limit=50&session=<id>` | events newest first, optionally scoped to one session; every row also carries its session's `label`, `tags`, and `display_id` (the one display rule: label else unique suffix), so a stream row answers who did what where on its own; a non-integer limit is a 400 |
-| GET `/api/threads?status=open` | threads newest first, optionally one status; ask rows (`kind: "ask"`) come with their lettered `options` parsed from JSON plus the `status`/`answer` state, approve rows carry `options: null` |
+| GET `/api/threads?status=open` | threads newest first, optionally one status; every row carries its session's identity (`label`, `tags`, `display_id`, `adapter`, `project`) and `decidable` (false only for `kind: "permission"` rows, whose `decidable_note` says where the answer really goes); ask rows (`kind: "ask"`) come with their lettered `options` parsed from JSON plus the `status`/`answer` state, approve and permission rows carry `options: null`; the payload also carries `approve_on`, the live `[toggles] approve` posture |
 | GET `/api/replies?limit=50` | replies, newest first, each row decorated with its `wake` state (`{state, ts}` from the wake dispatcher journal, or null when no decision was recorded); a non-integer limit is a 400 |
 | GET `/api/events/stream` | server-sent events: one `snapshot` on connect, then a `delta` after each ingest pass (about every 2 seconds), a `: ping` keepalive when 15 seconds pass with nothing to send |
 | POST `/api/replies` | body must be a JSON object with a string `body` and exactly one target, `thread_nonce` or `session_id`, or 400; the `session_id` value is resolved as an exact session id first, then a label exactly one session carries, then a tag exactly one session carries; an ambiguous label or tag is a 400 whose `sessions` key lists every matching session id, an unknown name a 404, an unknown thread nonce a 404; records the reply against the resolved session and appends the replies.jsonl line |
