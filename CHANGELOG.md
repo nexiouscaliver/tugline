@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Claude Code sessions are visible to tugline from their first turn:
+  the claude adapter spooled nothing before a session's first Stop
+  (the fresh SessionStart is skipped by design and UserPromptSubmit
+  ran log-only), so `tug ask` from inside a fresh session answered
+  "unknown session" on turn 1, auto-label never fired for claude, and
+  a mid-turn session read done/idle so the wake dispatcher could
+  spawn a concurrent driver on a live session. UserPromptSubmit now
+  spools one state-only prompt record in the zcode shape (suppressed
+  from publishing by policy; the store consumes it for session
+  identity, auto-label, and busy detection).
+
+- `tug ask --session` accepts a unique label or a unique tag, not
+  just the exact bare session id: the ask path runs the same id >
+  unique label > unique tag resolution the console's reply targeting
+  uses. An ambiguous name fails listing the candidate sessions (the
+  CLI twin of the console's ambiguous 400); an unknown one keeps the
+  unknown-session exit 2.
+
+- Hooks run in wake-spawned sessions: the claude installer wrote bare
+  `tug hook-claude <Event>` commands while the daemon (launchd) env
+  PATH is /usr/bin:/bin:/usr/sbin:/sbin, so every hook in a woken
+  session silently failed (no resume record, no stop preview, no
+  reply injection). The installer now embeds the absolute tug path
+  (PATH, the interpreter's bin dir, then ~/.local/bin; unresolvable
+  names stay bare) and upgrades existing bare-command installs in
+  place, and the wake spawn env carries the tug bin dirs as defense
+  in depth.
+
+- A console reply that answers an ask no longer triggers a redundant
+  wake: the ask runner flips the reply's journal line consumed when
+  it claims the answer, so the dispatcher does not spawn a
+  `--resume -p "B"` turn for a reply that was already delivered into
+  the asking agent.
+
 ### Added
 
 - Permission asks in the console, mobile and desktop: the store now

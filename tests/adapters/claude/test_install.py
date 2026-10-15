@@ -189,14 +189,18 @@ def test_permission_request_entry_carries_a_longer_timeout(settings_path):
     assert stop["timeout"] == 20
 
 
-def test_userpromptsubmit_entry_is_registered(settings_path):
+def test_userpromptsubmit_entry_is_registered(settings_path,
+                                              fixed_resolver):
     result = install_module.install(settings_path)
     assert result["status"] == "installed"
     data = json.loads(read(settings_path))
     groups = data["hooks"]["UserPromptSubmit"]
     assert len(groups) == 2  # the status tool's group plus tugline's
     tug_hook = groups[1]["hooks"][0]
-    assert tug_hook["command"] == "tug hook-claude UserPromptSubmit # " + MARKER
+    assert tug_hook["command"] == (
+        "%s hook-claude UserPromptSubmit # %s"
+        % (fixed_resolver, MARKER)
+    )
     assert tug_hook["timeout"] == 20
 
 
@@ -279,3 +283,137 @@ def test_install_command_override_lands_in_every_entry(tmp_path):
     for event in WIRED_EVENTS:
         command = data["hooks"][event][0]["hooks"][0]["command"]
         assert command.startswith("/opt/venv/bin/tug hook-claude %s" % event)
+
+
+# -- absolute hook commands (W10-L23) --
+#
+# The daemon (launchd) and the sessions it wakes run on
+# PATH=/usr/bin:/bin:/usr/sbin:/sbin, where a bare "tug" cannot
+# resolve: every hook in a wake-spawned session silently failed. New
+# installs embed the absolute tug path, and existing installs with
+# bare commands are upgraded in place (still idempotent).
+
+
+@pytest.fixture
+def fixed_resolver(monkeypatch):
+    """Pin the resolver so assertions do not depend on the machine."""
+    monkeypatch.setattr(
+        install_module, "absolute_command",
+        lambda name: "/opt/tug-test/bin/tug",
+    )
+    return "/opt/tug-test/bin/tug"
+
+
+def test_absolute_command_resolves_via_which(tmp_path):
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    tug = bindir / "tug"
+    tug.write_text("#!/bin/sh\n", encoding="utf-8")
+    tug.chmod(0o755)
+    resolved = install_module.absolute_command(
+        "tug", which=lambda name: str(tug)
+    )
+    assert resolved == str(tug)
+
+
+def test_absolute_command_falls_back_to_the_interpreter_dir(
+    tmp_path, monkeypatch
+):
+    bindir = tmp_path / "venv" / "bin"
+    bindir.mkdir(parents=True)
+    tug = bindir / "tug"
+    tug.write_text("#!/bin/sh\n", encoding="utf-8")
+    tug.chmod(0o755)
+    monkeypatch.setattr(install_module.sys, "executable",
+                        str(bindir / "python"))
+    resolved = install_module.absolute_command(
+        "tug", which=lambda name: None
+    )
+    assert resolved == str(tug)
+
+
+def test_absolute_command_stays_bare_when_unresolvable():
+    name = "definitely-not-a-real-tug-binary"
+    assert (
+        install_module.absolute_command(name, which=lambda n: None)
+        == name
+    )
+
+
+def test_absolute_command_passes_explicit_paths_through():
+    assert (
+        install_module.absolute_command("/opt/venv/bin/tug")
+        == "/opt/venv/bin/tug"
+    )
+
+
+def test_install_embeds_the_absolute_tug_path(settings_path,
+                                              fixed_resolver):
+    result = install_module.install(settings_path)
+    assert result["status"] == "installed"
+    data = json.loads(read(settings_path))
+    for event in WIRED_EVENTS:
+        command = data["hooks"][event][1]["hooks"][0]["command"]
+        assert command.startswith(
+            "%s hook-claude %s" % (fixed_resolver, event)
+        )
+        assert MARKER in command
+
+
+def test_existing_bare_commands_are_upgraded_in_place(
+    settings_path, fixed_resolver
+):
+    install_module.install(settings_path)
+    bare = json.loads(read(settings_path))
+    for event in WIRED_EVENTS:
+        bare["hooks"][event][1]["hooks"][0]["command"] = (
+            "tug hook-claude %s # %s" % (event, MARKER)
+        )
+    settings_path.write_text(
+        json.dumps(bare, indent=2) + "\n", encoding="utf-8"
+    )
+
+    result = install_module.install(settings_path)
+
+    assert result["status"] == "installed"
+    assert result["changed"] is True
+    assert result["upgraded"] == len(WIRED_EVENTS)
+    assert result["backup"] is not None
+    data = json.loads(read(settings_path))
+    for event in WIRED_EVENTS:
+        command = data["hooks"][event][1]["hooks"][0]["command"]
+        assert command == "%s hook-claude %s # %s" % (
+            fixed_resolver, event, MARKER
+        )
+    # and the upgrade is itself idempotent
+    installed_text = read(settings_path)
+    again = install_module.install(settings_path)
+    assert again["status"] == "already-installed"
+    assert again["changed"] is False
+    assert read(settings_path) == installed_text
+
+
+def test_upgrade_leaves_explicit_paths_alone(settings_path,
+                                             fixed_resolver):
+    """A mixed install: four events carry bare pre-fix commands, one
+    carries an explicit path. Only the bare ones are rewritten."""
+    install_module.install(settings_path)
+    data = json.loads(read(settings_path))
+    explicit = "/custom/venv/bin/tug"
+    for event in WIRED_EVENTS:
+        if event == "Stop":
+            command = "%s hook-claude %s # %s" % (explicit, event, MARKER)
+        else:
+            command = "tug hook-claude %s # %s" % (event, MARKER)
+        data["hooks"][event][1]["hooks"][0]["command"] = command
+    settings_path.write_text(
+        json.dumps(data, indent=2) + "\n", encoding="utf-8"
+    )
+
+    result = install_module.install(settings_path)
+
+    assert result["upgraded"] == len(WIRED_EVENTS) - 1
+    after = json.loads(read(settings_path))
+    assert after["hooks"]["Stop"][1]["hooks"][0]["command"] == (
+        "%s hook-claude Stop # %s" % (explicit, MARKER)
+    )

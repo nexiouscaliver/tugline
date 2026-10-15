@@ -319,6 +319,7 @@ def test_default_spawn_passes_the_augmented_path_to_the_child(
     exe_dir = pin_executable_dir(tmp_path, monkeypatch)
     monkeypatch.setenv("PATH", str(on_path))
     monkeypatch.setattr(wake_mod, "EXTRA_EXEC_PATHS", [str(extra)])
+    monkeypatch.setattr(wake_mod, "tug_bin_dirs", lambda: [])
     captured = {}
 
     def fake_popen(argv, **kwargs):
@@ -341,6 +342,71 @@ def test_default_spawn_passes_the_augmented_path_to_the_child(
     assert captured["stderr"] is subprocess.DEVNULL
     assert captured["stdin"] is subprocess.DEVNULL
 
+
+
+
+# -- the tug bin dirs ride along for the child's hooks (W10-L23) --
+#
+# The hooks a woken session executes are "tug hook-claude <Event>"
+# commands; under the daemon's launchd PATH a bare tug cannot resolve,
+# so every hook in a wake-spawned session silently failed. The
+# installer embeds absolute paths, and the spawn env carries the tug
+# bin dirs as defense in depth.
+
+
+def make_tug_dir(tmp_path, sub="tug-bin"):
+    bindir = tmp_path / sub
+    bindir.mkdir()
+    tug = bindir / "tug"
+    tug.write_text("#!/bin/sh\n", encoding="utf-8")
+    tug.chmod(0o755)
+    return bindir
+
+
+def test_tug_bin_dirs_find_the_interpreter_sibling(tmp_path,
+                                                   monkeypatch):
+    bindir = make_tug_dir(tmp_path, sub="venv-bin")
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setattr(wake_mod.sys, "executable",
+                        str(bindir / "python"))
+    monkeypatch.setenv("HOME", str(fake_home))
+
+    assert wake_mod.tug_bin_dirs() == [str(bindir)]
+
+
+def test_augmented_path_carries_the_tug_bin_dirs(tmp_path,
+                                                 monkeypatch):
+    tugdir = make_tug_dir(tmp_path)
+    monkeypatch.setattr(wake_mod, "EXTRA_EXEC_PATHS", [])
+    monkeypatch.setattr(wake_mod, "tug_bin_dirs", lambda: [str(tugdir)])
+
+    path = wake_mod._augmented_path({"PATH": "/usr/bin:/bin"})
+
+    components = path.split(os.pathsep)
+    # the union carries the running executable's dir too (main's W16),
+    # so assert membership and order rather than an exact string
+    assert components[:2] == ["/usr/bin", "/bin"]
+    assert str(tugdir) in components
+
+
+def test_default_spawn_env_includes_the_tug_bin_dir(tmp_path,
+                                                    monkeypatch):
+    tugdir = make_tug_dir(tmp_path)
+    monkeypatch.setattr(wake_mod, "EXTRA_EXEC_PATHS", [])
+    monkeypatch.setattr(wake_mod, "tug_bin_dirs", lambda: [str(tugdir)])
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+    captured = {}
+
+    def fake_popen(argv, **kwargs):
+        captured.update(kwargs)
+        return FakeProc()
+
+    monkeypatch.setattr(wake_mod.subprocess, "Popen", fake_popen)
+
+    wake_mod._default_spawn(["/usr/bin/true"])
+
+    assert captured["env"]["PATH"].endswith(os.pathsep + str(tugdir))
 
 # -- the spawn PATH carries the running tug executable's dir (W16) --
 
