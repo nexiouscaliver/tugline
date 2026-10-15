@@ -27,7 +27,10 @@ on stdin. This module is the tugline side of that contract:
 - UserPromptSubmit injects unread operator replies into the session
   through Claude Code's documented context channel (one JSON object
   with hookSpecificOutput.additionalContext on stdout), so a running
-  session sees replies without waiting for a resume,
+  session sees replies without waiting for a resume, and spools one
+  state-only prompt record like the zcode adapter (suppressed from
+  publishing by policy; the store consumes it for session identity,
+  auto-label, and busy detection),
 - keep stdout EMPTY unless a permission decision is being returned or
   replies are being injected,
 - log exactly one line per run under ~/.tugline/logs/.
@@ -502,6 +505,35 @@ def _run(event_name, stdin) -> int:
             _log(event, "injected %d unread replies" % injected)
         else:
             _log(event, "prompt submitted, no unread replies")
+        # The prompt event spools exactly like the zcode adapter does:
+        # the record is state-only (the daemon's policy suppresses it
+        # from publishing), but the store learns the session from it.
+        # Without it a fresh claude session stays invisible until its
+        # first Stop, so tug ask fails on turn 1, auto-label never
+        # fires for claude, and a mid-turn session reads done/idle to
+        # the wake dispatcher.
+        prompt = str(normalized.get("prompt") or "")
+        if context_on:
+            title = payload_module.context_title(
+                "claude", _session_cwd(normalized), "prompt submitted"
+            )
+            detail = ("prompt: %s" % prompt[:60]).rstrip() if prompt else ""
+            body = payload_module.context_body(session, detail)
+        else:
+            title = "prompt submitted"
+            body = prompt[:60] or "session %s" % (
+                payload_module.short_session_id(session)
+            )
+        spool.append(
+            paths.spool_root(),
+            event="userpromptsubmit",
+            session_id=session,
+            topic="main",
+            priority="default",
+            title=title,
+            body=body,
+            extra=extra,
+        )
         return 0
 
     _log(event, "event not wired")

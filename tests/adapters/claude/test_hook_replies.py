@@ -6,9 +6,10 @@ replies never reached a running session on this harness either. These
 tests pin the fix: the handler reads unconsumed replies (journal plus
 store session binding), emits one JSON object on stdout in Claude
 Code's documented shape (hookSpecificOutput.additionalContext), marks
-what it injected consumed in the journal, and never spools a record
-for the prompt (unchanged adapter behavior). Failures degrade
-silently: exit 0, no stdout.
+what it injected consumed in the journal, and also spools the
+state-only prompt record (the store learns the session at its first
+prompt; see test_hook_prompt_spool.py). Failures degrade silently:
+exit 0, no stdout.
 """
 
 import json
@@ -76,7 +77,8 @@ def test_prompt_injects_an_unread_reply(
     assert block["hookEventName"] == "UserPromptSubmit"
     assert "Approve" in block["additionalContext"]
     assert journal(tug_home)[0]["consumed"] is True
-    assert spool_records() == []  # the claude adapter never spooled prompts
+    # the prompt spools as a state-only record alongside the injection
+    assert [r["event"] for r in spool_records()] == ["userpromptsubmit"]
 
 
 def test_prompt_without_replies_prints_nothing(tug_home, hook_payload, capsys):
