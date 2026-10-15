@@ -43,12 +43,16 @@ label always wins and pauses auto-labeling for that session,
 including clearing it (label_source "operator").
 
 Thread safety: one connection shared by the whole process
-(check_same_thread=False), WAL journal so readers do not block the
-writer, and every write path serialized through one threading.Lock.
-The intended shape is a single process with multiple reader threads
-and one writer at a time; reads never take the lock. Transactions are
-managed explicitly (isolation_level=None) so each write path is one
-BEGIN IMMEDIATE ... COMMIT that rolls back whole on error.
+(check_same_thread=False), WAL journal, and EVERY connection use,
+read or write, serialized through one threading.Lock. WAL only
+keeps separate connections from blocking each other; it does
+nothing for two threads stepping cursors on the SAME connection,
+where a read interleaved with a write hands back sqlite3.Row
+objects shaped for the wrong statement (the intermittent
+IndexError the console listings threw while the ingest thread
+wrote). Transactions are managed explicitly (isolation_level=None)
+so each write path is one BEGIN IMMEDIATE ... COMMIT that rolls
+back whole on error.
 """
 
 from __future__ import annotations
@@ -402,6 +406,24 @@ class Store:
             path, check_same_thread=False, isolation_level=None
         )
         self.conn.row_factory = sqlite3.Row
+        # WHY reads serialize too: this one connection is shared by
+        # every thread, and two cursors stepping it at once (the
+        # console's ingest writer mid INSERT plus a request thread's
+        # listing SELECT) interleave inside one statement -- the
+        # sqlite3.Row objects then arrive shaped for the wrong
+        # statement, which surfaced as IndexError("tuple index out
+        # of range") in _identity_maps (local stress: 1 ingest
+        # writer + 6 readers on one Store, 5 hits in 20s; the CI
+        # flake class behind three console test failures). WAL
+        # cannot help: it isolates connections from each other, not
+        # threads inside one. Contract: every public method holds
+        # this lock for its whole connection-using span; private
+        # helpers (leading _) run under the caller's held lock and
+        # never acquire it themselves -- threading.Lock is not
+        # reentrant, so a public method that needs another public
+        # method's read calls its private core instead.
+        # __init__/_migrate run before the store is shared and are
+        # exempt (though _migrate takes the lock anyway).
         self._lock = threading.Lock()
         # busy_timeout FIRST: journal_mode wants a lock too, and
         # without the timeout a concurrent writer makes the very open
@@ -702,7 +724,8 @@ class Store:
     # -- ask threads (W9-L21) --
 
     def _thread_row(self, nonce) -> dict:
-        """One thread row with its options parsed from JSON."""
+        """One thread row with its options parsed from JSON; the
+        caller holds the lock."""
         row = self.conn.execute(
             "SELECT * FROM threads WHERE nonce = ?", (str(nonce),)
         ).fetchone()
@@ -750,7 +773,9 @@ class Store:
             except BaseException:
                 self.conn.execute("ROLLBACK")
                 raise
-        return self._thread_row(nonce_value)
+            # read back inside the same span: an unlocked tail read
+            # is the interleave race this class exists to prevent
+            return self._thread_row(nonce_value)
 
     def answer_ask_thread(self, nonce, key, answer_ts=None) -> dict:
         """Answer an open ask thread with one of its option keys.
@@ -806,7 +831,7 @@ class Store:
             except BaseException:
                 self.conn.execute("ROLLBACK")
                 raise
-        return self._thread_row(nonce)
+            return self._thread_row(nonce)
 
     def expire_ask_thread(self, nonce) -> bool:
         """Mark an open ask thread expired; True when it flipped.
@@ -836,12 +861,14 @@ class Store:
         newest open ask, so two concurrent asks never steal each
         other's answers.
         """
-        row = self.conn.execute(
-            "SELECT nonce FROM threads WHERE session_id = ? AND kind = 'ask'"
-            " AND status = 'open' ORDER BY created_ts DESC, rowid DESC",
-            (str(session_id),),
-        ).fetchone()
-        return row[0] if row is not None else ""
+        with self._lock:
+            row = self.conn.execute(
+                "SELECT nonce FROM threads WHERE session_id = ?"
+                " AND kind = 'ask' AND status = 'open'"
+                " ORDER BY created_ts DESC, rowid DESC",
+                (str(session_id),),
+            ).fetchone()
+            return row[0] if row is not None else ""
 
     # -- refresh --
 
@@ -884,29 +911,35 @@ class Store:
         """
         root = str(approvals_root)
         counts = {"answered": 0, "open": 0, "expired": 0}
-        rows = self.conn.execute(
-            "SELECT nonce, status FROM threads"
-            " WHERE status != 'answered' AND kind != 'ask'"
-        ).fetchall()
-        updates = []
-        for row in rows:
-            nonce = row["nonce"]
-            decision = _read_decision(os.path.join(root, nonce + ".json"))
-            if decision is not None:
-                updates.append(
-                    ("answered", nonce, decision["decision"],
-                     decision["ts"])
-                )
-                continue
-            pending = os.path.exists(
-                os.path.join(root, nonce + ".pending")
-            )
-            target = "open" if pending else "expired"
-            if target != row["status"]:
-                updates.append((target, nonce, None, None))
-        if not updates:
-            return counts
+        # One span for the whole reconcile: the opening SELECT is as
+        # much a connection use as the closing UPDATE, and pinning
+        # the file checks inside it too means no ingest cursor can
+        # interleave with either half.
         with self._lock:
+            rows = self.conn.execute(
+                "SELECT nonce, status FROM threads"
+                " WHERE status != 'answered' AND kind != 'ask'"
+            ).fetchall()
+            updates = []
+            for row in rows:
+                nonce = row["nonce"]
+                decision = _read_decision(
+                    os.path.join(root, nonce + ".json")
+                )
+                if decision is not None:
+                    updates.append(
+                        ("answered", nonce, decision["decision"],
+                         decision["ts"])
+                    )
+                    continue
+                pending = os.path.exists(
+                    os.path.join(root, nonce + ".pending")
+                )
+                target = "open" if pending else "expired"
+                if target != row["status"]:
+                    updates.append((target, nonce, None, None))
+            if not updates:
+                return counts
             self.conn.execute("BEGIN IMMEDIATE")
             try:
                 for status, nonce, answer, answer_ts in updates:
@@ -961,7 +994,7 @@ class Store:
             except BaseException:
                 self.conn.execute("ROLLBACK")
                 raise
-        return self._session_row(session_id)
+            return self._session_row(session_id)
 
     def add_session_tag(self, session_id, tag) -> dict:
         """Attach one tag to one session; returns the updated row.
@@ -972,7 +1005,8 @@ class Store:
         tag on the session. Attaching a tag already present is a
         no-op. KeyError for a session the store has never seen.
         """
-        return self._write_session_tag(session_id, tag, attach=True)
+        with self._lock:
+            return self._write_session_tag(session_id, tag, attach=True)
 
     def remove_session_tag(self, session_id, tag) -> dict:
         """Detach one tag from one session; returns the updated row.
@@ -980,55 +1014,57 @@ class Store:
         The tag is normalized first. Removing a tag that is not
         attached is a no-op. KeyError for an unknown session.
         """
-        return self._write_session_tag(session_id, tag, attach=False)
+        with self._lock:
+            return self._write_session_tag(session_id, tag, attach=False)
 
     def _write_session_tag(self, session_id, tag, attach) -> dict:
+        """The tag write both endpoints share; the caller holds the
+        lock."""
         session_id = str(session_id)
         tag = normalize_tag(tag)
-        with self._lock:
-            self.conn.execute("BEGIN IMMEDIATE")
-            try:
-                row = self.conn.execute(
-                    "SELECT 1 FROM sessions WHERE session_id = ?",
-                    (session_id,),
-                ).fetchone()
-                if row is None:
-                    raise KeyError("unknown session: %r" % session_id)
-                if attach:
-                    if not tag:
-                        raise ValueError(
-                            "tag must contain letters, digits, or hyphens"
-                        )
-                    if len(tag) > TAG_MAX_CHARS:
-                        raise ValueError(
-                            "tag must be at most %d characters"
-                            % TAG_MAX_CHARS
-                        )
-                    have = self._tags_locked(session_id)
-                    if tag not in have and len(have) >= TAG_MAX_PER_SESSION:
-                        raise ValueError(
-                            "a session carries at most %d tags"
-                            % TAG_MAX_PER_SESSION
-                        )
-                    self.conn.execute(
-                        "INSERT OR IGNORE INTO tags (session_id, tag)"
-                        " VALUES (?, ?)",
-                        (session_id, tag),
+        self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            row = self.conn.execute(
+                "SELECT 1 FROM sessions WHERE session_id = ?",
+                (session_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError("unknown session: %r" % session_id)
+            if attach:
+                if not tag:
+                    raise ValueError(
+                        "tag must contain letters, digits, or hyphens"
                     )
-                else:
-                    self.conn.execute(
-                        "DELETE FROM tags WHERE session_id = ? AND tag = ?",
-                        (session_id, tag),
+                if len(tag) > TAG_MAX_CHARS:
+                    raise ValueError(
+                        "tag must be at most %d characters"
+                        % TAG_MAX_CHARS
                     )
-                self.conn.execute("COMMIT")
-            except BaseException:
-                self.conn.execute("ROLLBACK")
-                raise
+                have = self._tags_locked(session_id)
+                if tag not in have and len(have) >= TAG_MAX_PER_SESSION:
+                    raise ValueError(
+                        "a session carries at most %d tags"
+                        % TAG_MAX_PER_SESSION
+                    )
+                self.conn.execute(
+                    "INSERT OR IGNORE INTO tags (session_id, tag)"
+                    " VALUES (?, ?)",
+                    (session_id, tag),
+                )
+            else:
+                self.conn.execute(
+                    "DELETE FROM tags WHERE session_id = ? AND tag = ?",
+                    (session_id, tag),
+                )
+            self.conn.execute("COMMIT")
+        except BaseException:
+            self.conn.execute("ROLLBACK")
+            raise
         return self._session_row(session_id)
 
     def _tags_locked(self, session_id) -> list:
-        """Tags for one session, alphabetical; caller holds a write
-        transaction or is fine with a racing read."""
+        """Tags for one session, alphabetical; the caller holds the
+        store lock."""
         rows = self.conn.execute(
             "SELECT tag FROM tags WHERE session_id = ? ORDER BY tag",
             (session_id,),
@@ -1037,11 +1073,12 @@ class Store:
 
     def session_tags(self, session_id) -> list:
         """One session's tags, alphabetical."""
-        return self._tags_locked(str(session_id))
+        with self._lock:
+            return self._tags_locked(str(session_id))
 
-    def sessions_with_tag(self, tag) -> list:
-        """Session ids carrying one normalized tag, insertion-stable
-        (ordered by when the store last saw each session)."""
+    def _sessions_with_tag_locked(self, tag) -> list:
+        """Session ids carrying one normalized tag, insertion-stable;
+        the caller holds the lock."""
         rows = self.conn.execute(
             "SELECT t.session_id FROM tags t JOIN sessions s"
             " ON s.session_id = t.session_id WHERE t.tag = ?"
@@ -1050,14 +1087,26 @@ class Store:
         ).fetchall()
         return [row[0] for row in rows]
 
-    def sessions_with_label(self, label) -> list:
-        """Session ids carrying one label exactly as given."""
+    def sessions_with_tag(self, tag) -> list:
+        """Session ids carrying one normalized tag, insertion-stable
+        (ordered by when the store last saw each session)."""
+        with self._lock:
+            return self._sessions_with_tag_locked(tag)
+
+    def _sessions_with_label_locked(self, label) -> list:
+        """Session ids carrying one label exactly as given; the
+        caller holds the lock."""
         rows = self.conn.execute(
             "SELECT session_id FROM sessions WHERE label = ?"
             " ORDER BY last_seen DESC",
             (str(label),),
         ).fetchall()
         return [row[0] for row in rows]
+
+    def sessions_with_label(self, label) -> list:
+        """Session ids carrying one label exactly as given."""
+        with self._lock:
+            return self._sessions_with_label_locked(label)
 
     def resolve_session_ref(self, ref) -> dict:
         """Resolve one reply-target reference to a session.
@@ -1073,30 +1122,35 @@ class Store:
         a 400 carrying the list).
         """
         ref = str(ref or "")
-        row = self.conn.execute(
-            "SELECT 1 FROM sessions WHERE session_id = ?", (ref,)
-        ).fetchone()
-        if row is not None:
-            return {"match": "session_id", "session_id": ref,
-                    "ambiguous": False, "candidates": []}
-        for match, ids in (
-            ("label", self.sessions_with_label(ref)),
-            ("tag", self.sessions_with_tag(ref)),
-        ):
-            if not ids:
-                continue
-            if len(ids) == 1:
-                return {"match": match, "session_id": ids[0],
+        with self._lock:
+            row = self.conn.execute(
+                "SELECT 1 FROM sessions WHERE session_id = ?", (ref,)
+            ).fetchone()
+            if row is not None:
+                return {"match": "session_id", "session_id": ref,
                         "ambiguous": False, "candidates": []}
-            return {"match": None, "session_id": "", "kind": match,
-                    "ambiguous": True, "candidates": sorted(ids)}
-        return {"match": None, "session_id": "",
-                "ambiguous": False, "candidates": []}
+            # the private cores, not the public wrappers: this method
+            # holds the lock and threading.Lock is not reentrant
+            for match, ids in (
+                ("label", self._sessions_with_label_locked(ref)),
+                ("tag", self._sessions_with_tag_locked(ref)),
+            ):
+                if not ids:
+                    continue
+                if len(ids) == 1:
+                    return {"match": match, "session_id": ids[0],
+                            "ambiguous": False, "candidates": []}
+                return {"match": None, "session_id": "", "kind": match,
+                        "ambiguous": True, "candidates": sorted(ids)}
+            return {"match": None, "session_id": "",
+                    "ambiguous": False, "candidates": []}
 
     def _identity_maps(self) -> tuple:
         """Label, tag, and display maps over every session, one read
         each, so row list endpoints can answer who did what where on
-        every row without per-row queries."""
+        every row without per-row queries. The caller holds the
+        lock: these full-table reads are exactly the cursors that
+        interleaved with ingest writes and threw the IndexError."""
         rows = self.conn.execute(
             "SELECT session_id, label FROM sessions"
         ).fetchall()
@@ -1117,7 +1171,8 @@ class Store:
         return labels, tags, display
 
     def _session_row(self, session_id) -> dict:
-        """One session row with its tags and display id attached."""
+        """One session row with its tags and display id attached; the
+        caller holds the lock."""
         row = dict(
             self.conn.execute(
                 "SELECT * FROM sessions WHERE session_id = ?",
@@ -1131,13 +1186,14 @@ class Store:
 
     def session(self, session_id) -> dict:
         """One session row (with tags and display id) or None."""
-        found = self.conn.execute(
-            "SELECT 1 FROM sessions WHERE session_id = ?",
-            (str(session_id),),
-        ).fetchone()
-        if found is None:
-            return None
-        return self._session_row(session_id)
+        with self._lock:
+            found = self.conn.execute(
+                "SELECT 1 FROM sessions WHERE session_id = ?",
+                (str(session_id),),
+            ).fetchone()
+            if found is None:
+                return None
+            return self._session_row(session_id)
 
     def add_reply(self, body, thread_nonce=None, session_id=None,
                   source="console") -> dict:
@@ -1153,16 +1209,18 @@ class Store:
             raise ValueError(
                 "exactly one of thread_nonce or session_id is required"
             )
-        if thread_nonce is not None:
-            row = self.conn.execute(
-                "SELECT session_id FROM threads WHERE nonce = ?",
-                (thread_nonce,),
-            ).fetchone()
-            if row is None:
-                raise KeyError("unknown thread nonce: %r" % thread_nonce)
-            session_id = row["session_id"]
         ts = _now_iso()
+        # one span: the nonce lookup read, the insert, and the
+        # read-back all serialize together
         with self._lock:
+            if thread_nonce is not None:
+                row = self.conn.execute(
+                    "SELECT session_id FROM threads WHERE nonce = ?",
+                    (thread_nonce,),
+                ).fetchone()
+                if row is None:
+                    raise KeyError("unknown thread nonce: %r" % thread_nonce)
+                session_id = row["session_id"]
             self.conn.execute("BEGIN IMMEDIATE")
             try:
                 cur = self.conn.execute(
@@ -1176,11 +1234,11 @@ class Store:
             except BaseException:
                 self.conn.execute("ROLLBACK")
                 raise
-        return dict(
-            self.conn.execute(
-                "SELECT * FROM replies WHERE id = ?", (rid,)
-            ).fetchone()
-        )
+            return dict(
+                self.conn.execute(
+                    "SELECT * FROM replies WHERE id = ?", (rid,)
+                ).fetchone()
+            )
 
     def record_answer(self, nonce, decision, answer_ts=None) -> None:
         """Mark a thread answered outside the decision-file flow.
@@ -1190,12 +1248,12 @@ class Store:
         Raises KeyError for an unknown nonce.
         """
         nonce = str(nonce)
-        row = self.conn.execute(
-            "SELECT 1 FROM threads WHERE nonce = ?", (nonce,)
-        ).fetchone()
-        if row is None:
-            raise KeyError("unknown thread nonce: %r" % nonce)
         with self._lock:
+            row = self.conn.execute(
+                "SELECT 1 FROM threads WHERE nonce = ?", (nonce,)
+            ).fetchone()
+            if row is None:
+                raise KeyError("unknown thread nonce: %r" % nonce)
             self.conn.execute("BEGIN IMMEDIATE")
             try:
                 self.conn.execute(
@@ -1210,10 +1268,9 @@ class Store:
 
     # -- queries --
 
-    def sessions(self) -> list:
-        """All sessions, most recently seen first, each with its tags
-        and its display id (the one display rule: label when set,
-        else the collision-proof unique suffix)."""
+    def _sessions_locked(self) -> list:
+        """All session rows with tags and display ids attached; the
+        caller holds the lock."""
         rows = self.conn.execute(
             "SELECT * FROM sessions ORDER BY last_seen DESC"
         ).fetchall()
@@ -1227,18 +1284,16 @@ class Store:
             out.append(item)
         return out
 
-    def events(self, limit=50, session_id=None) -> list:
-        """Events newest first; one session when session_id is given.
+    def sessions(self) -> list:
+        """All sessions, most recently seen first, each with its tags
+        and its display id (the one display rule: label when set,
+        else the collision-proof unique suffix)."""
+        with self._lock:
+            return self._sessions_locked()
 
-        Ordered by ts, not by insertion id: spool records can arrive
-        with out-of-order timestamps, so id order is not chronological.
-        The ISO-8601 strings from datetime.isoformat sort correctly as
-        plain text; id DESC tiebreaks identical timestamps.
-
-        Every row also carries its session's identity (label, tags,
-        display_id) so any stream view answers WHO did WHAT WHERE
-        without a second request.
-        """
+    def _events_locked(self, limit, session_id) -> list:
+        """Events newest first, one session when given, every row
+        carrying its session's identity; the caller holds the lock."""
         if session_id is None:
             rows = self.conn.execute(
                 "SELECT * FROM events ORDER BY ts DESC, id DESC LIMIT ?",
@@ -1261,6 +1316,21 @@ class Store:
             out.append(item)
         return out
 
+    def events(self, limit=50, session_id=None) -> list:
+        """Events newest first; one session when session_id is given.
+
+        Ordered by ts, not by insertion id: spool records can arrive
+        with out-of-order timestamps, so id order is not chronological.
+        The ISO-8601 strings from datetime.isoformat sort correctly as
+        plain text; id DESC tiebreaks identical timestamps.
+
+        Every row also carries its session's identity (label, tags,
+        display_id) so any stream view answers WHO did WHAT WHERE
+        without a second request.
+        """
+        with self._lock:
+            return self._events_locked(limit, session_id)
+
     def session_detail(self, session_id) -> dict:
         """One session with everything about it, in one read.
 
@@ -1276,37 +1346,41 @@ class Store:
         seen.
         """
         session_id = str(session_id)
-        row = self.conn.execute(
-            "SELECT 1 FROM sessions WHERE session_id = ?", (session_id,)
-        ).fetchone()
-        if row is None:
-            raise KeyError("unknown session: %r" % session_id)
-        prompt_row = self.conn.execute(
-            "SELECT body FROM events WHERE session_id = ?"
-            " AND LOWER(event) = 'userpromptsubmit'"
-            " ORDER BY ts DESC, id DESC LIMIT 1",
-            (session_id,),
-        ).fetchone()
-        response_row = self.conn.execute(
-            "SELECT response_preview FROM events WHERE session_id = ?"
-            " AND LOWER(event) = 'stop' AND response_preview != ''"
-            " ORDER BY ts DESC, id DESC LIMIT 1",
-            (session_id,),
-        ).fetchone()
-        return {
-            "session": self._session_row(session_id),
-            "last_prompt": prompt_row[0] if prompt_row is not None else "",
-            "last_response": (
-                response_row[0] if response_row is not None else ""
-            ),
-            "events": self.events(limit=100, session_id=session_id),
-        }
+        with self._lock:
+            row = self.conn.execute(
+                "SELECT 1 FROM sessions WHERE session_id = ?",
+                (session_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError("unknown session: %r" % session_id)
+            prompt_row = self.conn.execute(
+                "SELECT body FROM events WHERE session_id = ?"
+                " AND LOWER(event) = 'userpromptsubmit'"
+                " ORDER BY ts DESC, id DESC LIMIT 1",
+                (session_id,),
+            ).fetchone()
+            response_row = self.conn.execute(
+                "SELECT response_preview FROM events WHERE session_id = ?"
+                " AND LOWER(event) = 'stop' AND response_preview != ''"
+                " ORDER BY ts DESC, id DESC LIMIT 1",
+                (session_id,),
+            ).fetchone()
+            # _session_row and _events_locked, not session()/events():
+            # this method holds the lock and it is not reentrant
+            return {
+                "session": self._session_row(session_id),
+                "last_prompt": (
+                    prompt_row[0] if prompt_row is not None else ""
+                ),
+                "last_response": (
+                    response_row[0] if response_row is not None else ""
+                ),
+                "events": self._events_locked(100, session_id),
+            }
 
-    def threads(self, status=None) -> list:
-        """Threads newest first; one status when given. Ask rows come
-        back with their options parsed from JSON (None for approve
-        rows and anything unparseable), so one read carries both the
-        choices and the answer state."""
+    def _threads_locked(self, status=None) -> list:
+        """Thread rows newest first, one status when given, ask
+        options parsed; the caller holds the lock."""
         if status is None:
             rows = self.conn.execute(
                 "SELECT * FROM threads ORDER BY created_ts DESC"
@@ -1324,44 +1398,67 @@ class Store:
             out.append(item)
         return out
 
-    def replies(self, limit=50) -> list:
-        """Replies newest first."""
+    def threads(self, status=None) -> list:
+        """Threads newest first; one status when given. Ask rows come
+        back with their options parsed from JSON (None for approve
+        rows and anything unparseable), so one read carries both the
+        choices and the answer state."""
+        with self._lock:
+            return self._threads_locked(status)
+
+    def _replies_locked(self, limit) -> list:
+        """Reply rows newest first; the caller holds the lock."""
         rows = self.conn.execute(
             "SELECT * FROM replies ORDER BY id DESC LIMIT ?",
             (int(limit),),
         ).fetchall()
         return [dict(row) for row in rows]
 
+    def replies(self, limit=50) -> list:
+        """Replies newest first."""
+        with self._lock:
+            return self._replies_locked(limit)
+
     def snapshot(self) -> dict:
         """One read for a console render: sessions, the last 50
-        events, threads, the last 20 replies, and headline counts."""
-        return {
-            "sessions": self.sessions(),
-            "events": self.events(limit=50),
-            "threads": self.threads(),
-            "replies": self.replies(limit=20),
-            "counts": {
-                "events_total": self._count("SELECT COUNT(*) FROM events"),
-                "events_pending": self._count(
-                    "SELECT COUNT(*) FROM events WHERE delivered = 0"
-                ),
-                "threads_open": self._count(
-                    "SELECT COUNT(*) FROM threads WHERE status = 'open'"
-                ),
-            },
-        }
+        events, threads, the last 20 replies, and headline counts.
+
+        One lock span for the whole thing -- the private cores, not
+        the public wrappers, because the lock is not reentrant --
+        so the five reads see one consistent store."""
+        with self._lock:
+            return {
+                "sessions": self._sessions_locked(),
+                "events": self._events_locked(50, None),
+                "threads": self._threads_locked(),
+                "replies": self._replies_locked(20),
+                "counts": {
+                    "events_total": self._count(
+                        "SELECT COUNT(*) FROM events"
+                    ),
+                    "events_pending": self._count(
+                        "SELECT COUNT(*) FROM events WHERE delivered = 0"
+                    ),
+                    "threads_open": self._count(
+                        "SELECT COUNT(*) FROM threads WHERE status = 'open'"
+                    ),
+                },
+            }
 
     def _count(self, sql) -> int:
+        """One scalar count; the caller holds the lock."""
         return int(self.conn.execute(sql).fetchone()[0])
 
     def display_ids(self) -> dict:
         """The display id per session id over the whole store (the
         one display rule), for surfaces that render many rows."""
-        _, _, display = self._identity_maps()
-        return display
+        with self._lock:
+            _, _, display = self._identity_maps()
+            return display
 
     def close(self) -> None:
-        self.conn.close()
+        with self._lock:
+            self.conn.close()
 
     def __enter__(self) -> "Store":
         return self
