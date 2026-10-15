@@ -249,7 +249,7 @@ def test_fresh_store_is_schema_version_five(tmp_path):
     version = store.conn.execute(
         "SELECT value FROM meta WHERE key = 'schema_version'"
     ).fetchone()[0]
-    assert version == "6"
+    assert version == "7"
     cols = {
         row[1] for row in store.conn.execute("PRAGMA table_info(sessions)")
     }
@@ -285,7 +285,7 @@ def test_version_two_store_migrates_label_in_place(tmp_path):
     version = store.conn.execute(
         "SELECT value FROM meta WHERE key = 'schema_version'"
     ).fetchone()[0]
-    assert version == "6"
+    assert version == "7"
     # the live row rides over untouched, label starts NULL
     row = store.sessions()[0]
     assert row["session_id"] == "live-1"
