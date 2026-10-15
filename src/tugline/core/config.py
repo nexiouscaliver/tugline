@@ -52,8 +52,7 @@ claude_command = [
 zcode_command = [
   "node",
   "/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs",
-  "--resume",
-  "{session}",
+  "-c",
   "-p",
   "{body}",
   "--cwd",
@@ -164,16 +163,18 @@ claude_command = [
   "{body}",
 ]
 # The zcode driver command, run through node (the app ships a .cjs
-# bundle, not an executable). {session}, {body}, and {cwd} are
-# substituted at dispatch; the flags are verified against the
-# bundled CLI's own help (v0.16.9: -p, --resume, --cwd; --mode left
-# at its documented --prompt default, yolo). The path is the
-# ZCode.app-bundled CLI, version-locked to the installed app.
+# bundle, not an executable). -c continues the LATEST session in
+# {cwd} ({body} and {cwd} are substituted at dispatch); the flag is
+# verified by a live resume proof against the bundled CLI (a second
+# turn inside a pre-existing session, exit 0). The by-id --resume
+# form loses the model selection in the current app bundle (every
+# --resume <id> -p run exits 1 at model creation), so a future
+# fixed bundle would restore it here. The path is the ZCode.app-
+# bundled CLI, version-locked to the installed app.
 zcode_command = [
   "node",
   "/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs",
-  "--resume",
-  "{session}",
+  "-c",
   "-p",
   "{body}",
   "--cwd",
@@ -294,7 +295,9 @@ class WakeConfig:
 
     claude_command and zcode_command are argv templates: {session}
     and {body} are substituted at dispatch time, plus {cwd} (the
-    session's project directory) for the zcode --cwd flag."""
+    session's project directory) for the zcode --cwd flag. The zcode
+    default is the -c (continue-latest-in-cwd) form, which carries
+    no {session}; a --resume override may still use one."""
 
     adapters: list = None
     dry_run: bool = True
@@ -565,15 +568,21 @@ def _build(data, path):
         _check_type(toggles, "toggles", key, bool, path)
 
     adapters = _check_wake_strings(wake, "adapters", path)
-    for key in ("claude_command", "zcode_command"):
+    # claude resumes by session id, so {session} is mandatory there;
+    # the zcode default is the -c (continue-latest-in-cwd) form,
+    # which substitutes only {body} and {cwd}, so {session} stays
+    # optional for it (a --resume override still carries one)
+    for key, placeholders in (
+        ("claude_command", ("{session}", "{body}")),
+        ("zcode_command", ("{body}",)),
+    ):
         command = _check_wake_strings(wake, key, path)
-        if not any("{session}" == part for part in command) or not any(
-            "{body}" == part for part in command
-        ):
-            raise ConfigError(
-                "config [wake] %s needs a {session} and a {body}"
-                " argv entry: %s" % (key, path)
-            )
+        for placeholder in placeholders:
+            if not any(placeholder == part for part in command):
+                raise ConfigError(
+                    "config [wake] %s needs a %s argv entry: %s"
+                    % (key, placeholder, path)
+                )
     timeout = _check_type(wake, "wake", "timeout_seconds", (int, float), path)
     if isinstance(timeout, bool) or timeout <= 0:
         raise ConfigError(

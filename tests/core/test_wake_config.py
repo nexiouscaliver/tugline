@@ -110,8 +110,7 @@ def test_wake_defaults_on_fresh_config(home):
     assert wake.zcode_command == [
         "node",
         "/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs",
-        "--resume",
-        "{session}",
+        "-c",
         "-p",
         "{body}",
         "--cwd",
@@ -164,10 +163,20 @@ def test_wake_unknown_key_is_rejected(home, tmp_path):
 
 
 def test_claude_command_needs_both_placeholders(home, tmp_path):
-    text = WAKE_SECTION.replace('"{body}",', '"body",')
-    write_config(tmp_path / "config.toml", text)
+    # claude resumes by session id: {session} and {body} are both
+    # mandatory for it. Each drop is targeted at the claude block
+    # (the zcode fixture also carries the flags).
+    dropped_session = WAKE_SECTION.replace(
+        '"/opt/claude",\n  "--resume",\n  "{session}",',
+        '"/opt/claude",\n  "--resume",',
+    )
+    write_config(tmp_path / "a.toml", dropped_session)
     with pytest.raises(cfg.ConfigError):
-        cfg.load_config(tmp_path / "config.toml")
+        cfg.load_config(tmp_path / "a.toml")
+    dropped_body = WAKE_SECTION.replace('"{body}",\n]', '"body",\n]')
+    write_config(tmp_path / "b.toml", dropped_body)
+    with pytest.raises(cfg.ConfigError):
+        cfg.load_config(tmp_path / "b.toml")
 
 
 def test_claude_command_must_be_a_list_of_strings(home, tmp_path):
@@ -179,17 +188,36 @@ def test_claude_command_must_be_a_list_of_strings(home, tmp_path):
         cfg.load_config(tmp_path / "config.toml")
 
 
-def test_zcode_command_needs_both_placeholders(home, tmp_path):
-    # {cwd} is optional (the Popen cwd still applies), but {session}
-    # and {body} are not: a template missing either cannot resume.
-    # The two-line replace targets the {body} inside zcode_command
-    # (its neighbor flag is --cwd; claude's closes the array).
+def test_zcode_command_needs_body_placeholder(home, tmp_path):
+    # the -c default substitutes only {body} and {cwd}: {session} is
+    # optional for zcode (a --resume override carries one), {body}
+    # is not. The two-line replace targets the {body} inside
+    # zcode_command (its neighbor flag is --cwd; claude's closes
+    # the array).
     text = WAKE_SECTION.replace(
         '"{body}",\n  "--cwd",', '"body",\n  "--cwd",'
     )
     write_config(tmp_path / "config.toml", text)
     with pytest.raises(cfg.ConfigError):
         cfg.load_config(tmp_path / "config.toml")
+
+
+def test_zcode_command_allows_the_continue_form_without_session(
+    home, tmp_path
+):
+    # the shipped default is -c (continue latest in {cwd}), which
+    # has no {session} to substitute: a config carrying that shape
+    # must load, not trip the claude-oriented {session} requirement
+    text = WAKE_SECTION.replace(
+        '"/opt/zcode.cjs",\n  "--resume",\n  "{session}",',
+        '"/opt/zcode.cjs",\n  "-c",',
+    )
+    write_config(tmp_path / "config.toml", text)
+    conf = cfg.load_config(tmp_path / "config.toml")
+    assert conf.wake.zcode_command == [
+        "/opt/node", "/opt/zcode.cjs", "-c", "-p", "{body}",
+        "--cwd", "{cwd}",
+    ]
 
 
 def test_zcode_command_must_be_a_list_of_strings(home, tmp_path):
