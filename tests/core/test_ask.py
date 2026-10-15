@@ -689,3 +689,114 @@ def test_ask_by_exact_id_still_resolves(tmp_path):
     )
     assert result["ok"] is True
     runner._test_store.close()
+
+
+# -- an answered ask consumes its reply journal line (W10-L23) --
+#
+# A console reply that answers an ask used to leave its replies.jsonl
+# line unconsumed, so the wake dispatcher still spawned a redundant
+# claude --resume -p "B" turn for the very reply the ask had just
+# delivered. When the runner claims an answer it now marks the line
+# consumed, exactly like the injection path and the dispatcher do on
+# delivery.
+
+
+def journal_lines(path):
+    with open(path, encoding="utf-8") as fh:
+        return [json.loads(line) for line in fh if line.strip()]
+
+
+def console_dual_write(store, journal, nonce, body, line_id, session_id):
+    """Mirror the console's dual write: one store reply row bound to
+    the thread plus one replies.jsonl line carrying the row's ts and
+    body (the console mints a fresh journal id per line)."""
+    row = store.add_reply(body, thread_nonce=nonce, source="console")
+    journal_append(
+        journal,
+        {
+            "id": line_id,
+            "ts": row["ts"],
+            "topic": "tug-reply",
+            "title": "console reply",
+            "body": body,
+            "consumed": False,
+            "source": "console",
+            "session_id": session_id,
+        },
+    )
+    return row
+
+
+def test_console_reply_answer_consumes_the_journal_line(tmp_path):
+    seed(tmp_path)
+    runner = make_runner(tmp_path)
+    store, clock = runner._test_store, runner._test_clock
+    journal = str(tmp_path / "replies.jsonl")
+
+    def reply_later(seconds):
+        console_dual_write(
+            store, journal, "ask-c1", "B", "line-1", "sess_517ee9c0aaaa"
+        )
+
+    clock.on_sleep = reply_later
+    result = runner.run(
+        "sess_517ee9c0aaaa", "q?", OPTIONS, timeout_s=300, nonce="ask-c1"
+    )
+    assert result["ok"] is True
+    assert result["via"] == "reply"
+    lines = journal_lines(journal)
+    assert [line["consumed"] for line in lines] == [True]
+    store.close()
+
+
+def test_journal_answer_consumes_its_line(tmp_path):
+    seed(tmp_path)
+    runner = make_runner(tmp_path)
+    store, clock = runner._test_store, runner._test_clock
+    journal = str(tmp_path / "replies.jsonl")
+    journal_append(
+        journal,
+        {"id": "noise", "body": "not for this ask",
+         "session_id": "sess_517ee9c0aaaa", "consumed": False},
+    )
+
+    def reply_later(seconds):
+        journal_append(
+            journal,
+            {"id": "ntfy-9", "body": "A", "consumed": False,
+             "session_id": "sess_517ee9c0aaaa"},
+        )
+
+    clock.on_sleep = reply_later
+    result = runner.run(
+        "sess_517ee9c0aaaa", "q?", OPTIONS, timeout_s=300, nonce="ask-j1"
+    )
+    assert result["ok"] is True
+    assert result["via"] == "ntfy reply"
+    consumed = {
+        line["id"]: line["consumed"] for line in journal_lines(journal)
+    }
+    assert consumed == {"noise": False, "ntfy-9": True}
+    store.close()
+
+
+def test_non_key_reply_never_consumes_its_line(tmp_path):
+    seed(tmp_path)
+    runner = make_runner(tmp_path)
+    store, clock = runner._test_store, runner._test_clock
+    journal = str(tmp_path / "replies.jsonl")
+
+    def reply_later(seconds):
+        console_dual_write(
+            store, journal, "ask-n1", "maybe", "line-m",
+            "sess_517ee9c0aaaa",
+        )
+
+    clock.on_sleep = reply_later
+    result = runner.run(
+        "sess_517ee9c0aaaa", "q?", OPTIONS, timeout_s=5, nonce="ask-n1"
+    )
+    assert result["ok"] is False  # a non-key body never answers
+    lines = journal_lines(journal)
+    assert [line["consumed"] for line in lines] == [False]
+    store.close()

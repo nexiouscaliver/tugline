@@ -352,8 +352,26 @@ class AskRunner:
                         != key.upper()
                     ):
                         raise
+                self._claim_reply_line(
+                    ts=str(row.get("ts") or ""),
+                    body=str(row.get("body") or ""),
+                )
                 return key
         return None
+
+    def _claim_reply_line(self, ts, body):
+        """Consume the journal line for a reply claimed through the
+        store (the console dual-writes row and line sharing ts and
+        body). A line with empty ts or body is left alone: it cannot
+        be matched safely."""
+        if not ts or not body:
+            return
+        self._consume_journal_lines(
+            lambda entry: (
+                str(entry.get("ts") or "") == ts
+                and str(entry.get("body") or "") == body
+            )
+        )
 
     def _check_journal(self, nonce, session_id, options, baseline):
         """Reply journal lines (ntfy app replies and anything else
@@ -387,6 +405,11 @@ class AskRunner:
                     self.store.answer_ask_thread(nonce, key)
                 except Exception:
                     continue
+                claimed_id = entry.get("id")
+                if claimed_id:
+                    self._consume_journal_lines(
+                        lambda other, rid=claimed_id: other.get("id") == rid
+                    )
                 return key
         return None
 
@@ -404,6 +427,69 @@ class AskRunner:
         if key is None:
             return None, ""
         return key, "tug answer"
+
+    # -- journal consumption --
+
+    def _consume_journal_lines(self, match) -> int:
+        """Flip consumed=true on the reply journal lines an answered
+        ask produced; returns how many lines changed.
+
+        An answered ask has delivered its reply (the runner returns
+        the key to the asking agent), so the journal line must not
+        stay a pending delivery for the wake dispatcher or the
+        injection path: an unconsumed answer line is exactly the
+        redundant wake the audit caught (a console answer spawning
+        claude --resume -p "B"). The console mints a fresh journal id
+        per line, so a claimed store row is matched by (ts, body) and
+        a claimed journal entry by its id. Best effort by contract: a
+        lost race with a journal appender means a line may survive
+        unconsumed (worst case: one redundant wake), never a lost or
+        delayed answer.
+        """
+        if not self.replies_path:
+            return 0
+        for _ in range(2):
+            try:
+                with open(self.replies_path, "rb") as fh:
+                    raw = fh.read()
+                size = len(raw)
+                changed = 0
+                out_lines = []
+                for line in (
+                    raw.decode("utf-8", "replace").splitlines(keepends=True)
+                ):
+                    stripped = line.strip()
+                    if stripped:
+                        try:
+                            entry = json.loads(stripped)
+                        except ValueError:
+                            entry = None
+                        if (
+                            isinstance(entry, dict)
+                            and not entry.get("consumed")
+                            and match(entry)
+                        ):
+                            entry["consumed"] = True
+                            line = (
+                                json.dumps(entry, separators=(",", ":"))
+                                + "\n"
+                            )
+                            changed += 1
+                    out_lines.append(line)
+                if not changed:
+                    return 0
+                if os.path.getsize(self.replies_path) != size:
+                    continue  # an appender moved the journal; re-read
+                tmp = self.replies_path + ".ask.tmp"
+                with open(tmp, "w", encoding="utf-8") as fh:
+                    fh.write("".join(out_lines))
+                    fh.flush()
+                    os.fsync(fh.fileno())
+                os.replace(tmp, self.replies_path)
+                return changed
+            except OSError:
+                return 0
+        return 0
 
     # -- inputs --
 
