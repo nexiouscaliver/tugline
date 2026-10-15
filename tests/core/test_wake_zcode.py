@@ -1,20 +1,24 @@
 """Tests for the zcode wake driver (tugline.core.wake).
 
-The zcode driver resumes an idle zcode session through the
-app-bundled CLI: node <ZCode.app>/Contents/Resources/glm/zcode.cjs
---resume <session> -p "<reply body>" --cwd <project dir>. Every flag
-here was verified against `zcode.cjs --help` (v0.16.9): -p runs a
-single prompt without opening the TUI, --resume takes a sessionId,
---cwd sets the working directory, and --mode is deliberately NOT
-passed because the documented default for --prompt is yolo. The real
-zcode.cjs (and the real node) is never spawned by a test: unit tests
-fake the spawn, the one real-Popen test points both the interpreter
-and the CLI slot at fake shell scripts.
+The zcode driver continues the latest zcode session in the project
+directory through the app-bundled CLI: node
+<ZCode.app>/Contents/Resources/glm/zcode.cjs -c -p "<reply body>"
+--cwd <project dir>. -c is verified by a live resume proof against
+the bundled CLI (a second turn inside a pre-existing session, exit
+0); the by-id --resume form is broken in the current app bundle
+(every --resume <id> -p run exits 1 at model creation because the
+rehydrated session loses its model selection), so it appears here
+only as a custom wake.zcode_command override, which also bypasses
+the latest-in-cwd guard. The real zcode.cjs (and the real node) is
+never spawned by a test: unit tests fake the spawn, the one
+real-Popen test points both the interpreter and the CLI slot at
+fake shell scripts.
 """
 
 import json
 import os
 import stat
+from datetime import datetime, timezone
 
 from tugline.core import config as cfg
 from tugline.core import spool
@@ -56,8 +60,12 @@ def make_config(wake=None, wake_enabled=True):
 
 
 def seed_store(tmp_path, event="stop", adapter="zcode", session_id="sess-z1",
-               cwd="/tmp/zcode-proj"):
-    """A real store holding one session with the given last event."""
+               cwd="/tmp/zcode-proj", now=None):
+    """A real store holding one session with the given last event.
+
+    now (a timezone-aware datetime) seeds last_seen deterministically
+    so the latest-in-cwd guard tests can name the latest session
+    without racing the wall clock."""
     root = str(tmp_path / "spool")
     spool.append(
         root,
@@ -68,6 +76,7 @@ def seed_store(tmp_path, event="stop", adapter="zcode", session_id="sess-z1",
         title="t",
         body="b",
         extra={"adapter": adapter, "cwd": cwd, "project": "zcode-proj"},
+        now=now,
     )
     store = Store(str(tmp_path / "store" / "tugline.db"))
     store.ingest_spool(root)
@@ -163,15 +172,18 @@ def test_default_zcode_command_is_the_verified_flag_order():
     assert DEFAULT_ZCODE_COMMAND == [
         "node",
         ZCODE_CJS,
-        "--resume",
-        "{session}",
+        "-c",
         "-p",
         "{body}",
         "--cwd",
         "{cwd}",
     ]
-    # --mode is deliberately absent: the documented default for
-    # --prompt is yolo, so the driver never pins a mode
+    # -c continues the LATEST session in --cwd (live-verified); the
+    # by-id --resume form is broken in the current app bundle (it
+    # loses the model selection), so the default never carries it
+    # and {session} is not substituted at all
+    assert "--resume" not in DEFAULT_ZCODE_COMMAND
+    assert "{session}" not in DEFAULT_ZCODE_COMMAND
     assert "--mode" not in DEFAULT_ZCODE_COMMAND
 
 
@@ -196,8 +208,7 @@ def test_wake_dispatches_idle_zcode_session(tmp_path, monkeypatch):
     assert call["argv"] == [
         str(bindir / "node"),
         ZCODE_CJS,
-        "--resume",
-        "sess-z1",
+        "-c",
         "-p",
         "do the zcode thing",
         "--cwd",
@@ -221,15 +232,153 @@ def test_zcode_cwd_flag_falls_back_to_home_when_row_lacks_it(tmp_path):
     # a store row from before the cwd enrichment has no cwd: the
     # --cwd flag still gets a real directory instead of an empty
     # string (the daemon's own cwd would be meaningless to a resumed
-    # session)
+    # session). The default -c command skips such rows entirely (it
+    # cannot know which session is latest in a cwd it does not
+    # know), so the fallback rides the by-id override template here.
     seed_store(tmp_path, cwd="")
     append_reply(tmp_path)
     spawn = FakeSpawn()
-    dispatcher = make_dispatcher(tmp_path, spawn=spawn)
+    config = make_config(
+        wake=cfg.WakeConfig(
+            zcode_command=[
+                "node",
+                ZCODE_CJS,
+                "--resume",
+                "{session}",
+                "-p",
+                "{body}",
+                "--cwd",
+                "{cwd}",
+            ],
+            dry_run=False,
+        )
+    )
+    dispatcher = make_dispatcher(tmp_path, config=config, spawn=spawn)
 
     assert dispatcher.poll() == 1
     argv = spawn.calls[0]["argv"]
     assert argv[argv.index("--cwd") + 1] == os.path.expanduser("~")
+
+
+# -- the latest-in-cwd guard on the -c default --
+
+
+def test_continue_guard_skips_non_latest_session_in_cwd(tmp_path):
+    # -c continues whatever session is latest in --cwd: a reply
+    # bound to the OLDER of two same-cwd sessions must not wake (it
+    # would land in the newer conversation), and the skip leaves the
+    # reply for the injection path
+    seed_store(
+        tmp_path, session_id="sess-old", cwd="/tmp/shared",
+        now=datetime(2026, 10, 15, 8, 0, 0, tzinfo=timezone.utc),
+    )
+    seed_store(
+        tmp_path, session_id="sess-new", cwd="/tmp/shared",
+        now=datetime(2026, 10, 15, 9, 0, 0, tzinfo=timezone.utc),
+    )
+    append_reply(tmp_path, rid="rep-old", session_id="sess-old")
+    spawn = FakeSpawn()
+    logs = []
+    dispatcher = make_dispatcher(tmp_path, spawn=spawn, log=logs.append)
+
+    assert dispatcher.poll() == 0
+    assert spawn.calls == []
+    assert read_reply_lines(tmp_path)[0]["consumed"] is False
+    events = read_journal(tmp_path)
+    assert [e["event"] for e in events] == ["skipped"]
+    # the journal reason and the log line both name the latest
+    # session, so the skip is explainable without the daemon log
+    assert "sess-new" in events[0]["reason"]
+    assert "/tmp/shared" in events[0]["reason"]
+    assert any(
+        "wake skipped: session sess-old is not the latest in /tmp/shared"
+        " (latest sess-new)" in line
+        for line in logs
+    )
+
+
+def test_continue_guard_dispatches_latest_session_in_cwd(
+    tmp_path, monkeypatch
+):
+    # the same store, reply bound to the LATEST session: the wake
+    # goes out with the -c argv
+    bindir = pin_fake_node(tmp_path, monkeypatch)
+    seed_store(
+        tmp_path, session_id="sess-old", cwd="/tmp/shared",
+        now=datetime(2026, 10, 15, 8, 0, 0, tzinfo=timezone.utc),
+    )
+    seed_store(
+        tmp_path, session_id="sess-new", cwd="/tmp/shared",
+        now=datetime(2026, 10, 15, 9, 0, 0, tzinfo=timezone.utc),
+    )
+    append_reply(tmp_path, rid="rep-new", session_id="sess-new")
+    spawn = FakeSpawn()
+    dispatcher = make_dispatcher(tmp_path, spawn=spawn)
+
+    assert dispatcher.poll() == 1
+    assert spawn.calls[0]["argv"] == [
+        str(bindir / "node"),
+        ZCODE_CJS,
+        "-c",
+        "-p",
+        "do the zcode thing",
+        "--cwd",
+        "/tmp/shared",
+    ]
+
+
+def test_resume_override_bypasses_the_continue_guard(tmp_path):
+    # a custom by-id --resume template addresses one session
+    # directly: it must still dispatch for a non-latest session,
+    # where the -c default would have skipped
+    seed_store(
+        tmp_path, session_id="sess-old", cwd="/tmp/shared",
+        now=datetime(2026, 10, 15, 8, 0, 0, tzinfo=timezone.utc),
+    )
+    seed_store(
+        tmp_path, session_id="sess-new", cwd="/tmp/shared",
+        now=datetime(2026, 10, 15, 9, 0, 0, tzinfo=timezone.utc),
+    )
+    append_reply(tmp_path, rid="rep-old", session_id="sess-old")
+    spawn = FakeSpawn()
+    config = make_config(
+        wake=cfg.WakeConfig(
+            zcode_command=[
+                "node",
+                ZCODE_CJS,
+                "--resume",
+                "{session}",
+                "-p",
+                "{body}",
+                "--cwd",
+                "{cwd}",
+            ],
+            dry_run=False,
+        )
+    )
+    dispatcher = make_dispatcher(tmp_path, config=config, spawn=spawn)
+
+    assert dispatcher.poll() == 1
+    argv = spawn.calls[0]["argv"]
+    assert argv[argv.index("--resume") + 1] == "sess-old"
+
+
+def test_continue_guard_skips_when_row_has_no_cwd(tmp_path):
+    # a pre-enrichment row has no cwd: the store cannot say which
+    # session -c would continue in the home fallback, so the wake
+    # stands down and the reply stays for the injection path
+    seed_store(tmp_path, cwd="")
+    append_reply(tmp_path)
+    spawn = FakeSpawn()
+    logs = []
+    dispatcher = make_dispatcher(tmp_path, spawn=spawn, log=logs.append)
+
+    assert dispatcher.poll() == 0
+    assert spawn.calls == []
+    assert read_reply_lines(tmp_path)[0]["consumed"] is False
+    events = read_journal(tmp_path)
+    assert [e["event"] for e in events] == ["skipped"]
+    assert "unknown" in events[0]["reason"]
 
 
 # -- rails: dedupe, idle-only, toggle-off --
@@ -339,8 +488,7 @@ def test_zcode_dry_run_records_the_command_without_spawning(
     assert events[0]["command"] == [
         str(bindir / "node"),
         ZCODE_CJS,
-        "--resume",
-        "sess-z1",
+        "-c",
         "-p",
         "do the zcode thing",
         "--cwd",
@@ -374,8 +522,7 @@ def test_real_spawn_runs_a_fake_node_and_fake_cli_script(tmp_path):
             zcode_command=[
                 str(fake_node),
                 str(fake_cli),
-                "--resume",
-                "{session}",
+                "-c",
                 "-p",
                 "{body}",
                 "--cwd",
@@ -399,8 +546,7 @@ def test_real_spawn_runs_a_fake_node_and_fake_cli_script(tmp_path):
     argv = out.read_text().strip().split("\n")
     assert argv == [
         str(fake_cli),
-        "--resume",
-        "sess-z1",
+        "-c",
         "-p",
         "hello from the zcode test",
         "--cwd",

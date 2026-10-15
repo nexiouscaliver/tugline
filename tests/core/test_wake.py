@@ -348,9 +348,13 @@ def test_wake_finish_logs_exit_code_and_duration(tmp_path):
 
     assert "wake finished: exit 3 after 42s" in logs
     events = read_journal(tmp_path)
-    assert events[-1]["event"] == "finished"
+    finished = [e for e in events if e["event"] == "finished"][0]
+    assert finished["exit_code"] == 3
+    assert finished["duration_s"] == 42.0
+    # the failed turn re-opened the reply for the injection path
+    assert events[-1]["event"] == "reopened"
     assert events[-1]["exit_code"] == 3
-    assert events[-1]["duration_s"] == 42.0
+    assert read_reply_lines(tmp_path)[0]["consumed"] is False
 
 
 def test_global_cap_defers_second_session_wake(tmp_path):
@@ -399,7 +403,86 @@ def test_timeout_kills_and_logs(tmp_path):
 
     assert any("wake timed out" in line for line in logs)
     events = read_journal(tmp_path)
-    assert events[-1]["event"] == "timed_out"
+    assert events[-2]["event"] == "timed_out"
+    # the killed turn re-opened the reply for the injection path
+    assert events[-1]["event"] == "reopened"
+    assert events[-1]["duration_s"] == 31.0
+    assert read_reply_lines(tmp_path)[0]["consumed"] is False
+
+
+# -- a failed or timed-out wake re-opens the reply --
+
+
+def test_failed_wake_reopens_the_reply(tmp_path):
+    # the reply is marked consumed at dispatch; a turn that then
+    # exits nonzero never delivered it, so it must flip back to
+    # unconsumed for the injection path instead of vanishing
+    seed_store(tmp_path)
+    append_reply(tmp_path)
+    spawn = FakeSpawn(exit_code=7)
+    logs = []
+    dispatcher = make_dispatcher(tmp_path, spawn=spawn, log=logs.append)
+
+    assert dispatcher.poll() == 1
+    assert read_reply_lines(tmp_path)[0]["consumed"] is True
+    release_all(spawn)
+    assert dispatcher.poll() == 0
+
+    events = read_journal(tmp_path)
+    assert events[-1]["event"] == "reopened"
+    assert events[-1]["exit_code"] == 7
+    assert events[-1]["session_id"] == "sess-1"
+    assert events[-1]["adapter"] == "claude"
+    assert read_reply_lines(tmp_path)[0]["consumed"] is False
+    assert any(
+        "re-opened for next-boundary injection" in line for line in logs
+    )
+
+
+def test_tiny_timeout_reopens_the_reply(tmp_path):
+    # a wake that never exits on its own hits the timeout path: the
+    # kill is followed by the same re-open, journaling the duration
+    seed_store(tmp_path)
+    append_reply(tmp_path)
+    spawn = FakeSpawn()  # FakeProc stays pending until killed
+    logs = []
+    clock = {"t": 50.0}
+    config = make_config(
+        wake=cfg.WakeConfig(timeout_seconds=1.0, dry_run=False)
+    )
+    dispatcher = make_dispatcher(
+        tmp_path, config=config, spawn=spawn, log=logs.append,
+        now=lambda: clock["t"],
+    )
+
+    dispatcher.poll()
+    assert read_reply_lines(tmp_path)[0]["consumed"] is True
+    clock["t"] += 2.0
+    dispatcher.poll()
+
+    events = read_journal(tmp_path)
+    assert events[-2]["event"] == "timed_out"
+    assert events[-1]["event"] == "reopened"
+    assert events[-1]["duration_s"] == 2.0
+    assert read_reply_lines(tmp_path)[0]["consumed"] is False
+    assert spawn.procs[0].killed is True
+
+
+def test_successful_wake_does_not_reopen_the_reply(tmp_path):
+    # exit 0 means the turn consumed the reply legitimately: the
+    # consumed mark stands and no reopened event is journaled
+    seed_store(tmp_path)
+    append_reply(tmp_path)
+    spawn = FakeSpawn(exit_code=0)
+    dispatcher = make_dispatcher(tmp_path, spawn=spawn)
+
+    assert dispatcher.poll() == 1
+    release_all(spawn)
+    assert dispatcher.poll() == 0
+
+    events = read_journal(tmp_path)
+    assert [e["event"] for e in events] == ["dispatched", "finished"]
+    assert read_reply_lines(tmp_path)[0]["consumed"] is True
 
 
 # -- dry run and the master toggle --

@@ -272,6 +272,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The zcode wake driver now continues the latest session in the
+  session's project directory (`-c`) instead of resuming by id: the
+  app-bundled CLI's `--resume <id> -p` form always exits 1 at model
+  creation ("Select a model before continuing") because the
+  rehydrated session loses its model selection, while `-c`
+  genuinely resumes (live-verified: a second turn inside a
+  pre-existing session, exit 0). A new guard skips the wake when the
+  bound session is not the store's latest for its cwd, so `-c` can
+  never deliver a reply to the wrong session; a `wake.zcode_command`
+  override using the by-id `--resume` form skips the guard. A wake
+  whose turn then fails or times out re-opens its reply for
+  next-boundary injection: the reply is marked consumed at dispatch,
+  so a dead turn previously left it silently swallowed and delivered
+  nowhere.
 - A console option tap no longer reads as an error inside the asking
   process: the console ask endpoint closes the thread before it
   records the reply row, and `tug ask` now treats the reply row it
