@@ -51,8 +51,9 @@ stays queued for the injection path); a fixed bundle can restore
 --resume through wake.zcode_command, whose by-id template skips
 the guard.
 
-Bare driver names are resolved against PATH plus a few extra roots
-(see EXTRA_EXEC_PATHS) before the journal or the spawn sees them:
+Bare driver names are resolved against PATH plus the running tug
+executable's own directory plus a few extra roots (see
+EXTRA_EXEC_PATHS) before the journal or the spawn sees them:
 the daemon runs under launchd, whose PATH=/usr/bin:/bin:/usr/sbin:
 /sbin has no node, and both live wake dispatches died with
 "[Errno 2] No such file or directory: 'node'" while the same
@@ -80,6 +81,7 @@ import os
 import shutil
 import sqlite3
 import subprocess
+import sys
 import time
 import urllib.request
 from datetime import datetime, timezone
@@ -165,12 +167,37 @@ EXTRA_EXEC_PATHS = ["/opt/homebrew/bin", "/usr/local/bin"]
 
 def _augmented_path(env=None):
     """PATH from env (falling back to the process environment) plus
-    the extra roots, empty components dropped: the os.pathsep-joined
-    search string shutil.which consumes."""
+    the running executable's directory plus the extra roots, empty
+    components dropped and every entry collapsed to its first
+    occurrence: the os.pathsep-joined search string shutil.which
+    consumes."""
     source = os.environ if env is None else env
-    parts = [source.get("PATH") or ""]
+    # the env PATH is split, not joined whole: dedup has to see the
+    # components to collapse a dir that both the inherited PATH and
+    # the executable's own contribution carry
+    parts = (source.get("PATH") or "").split(os.pathsep)
+    # WHY the executable's own directory: the session a wake spawns
+    # runs tugline hooks shaped "tug hook-zcode <Event>", and that
+    # tug must be the same binary the daemon runs. tugline installs
+    # as a uv tool whose venv bin dir (e.g. ~/.local/share/uv/tools/
+    # tugline/bin) is on no launchd PATH and in no extra root, so a
+    # woken turn could fully succeed while every hook of its own died
+    # (core.hooks hook.run.failed) and the turn stayed store-silent:
+    # no session events, no response preview, no stop buzz. The dir
+    # sits before the extra roots so the daemon's own tug outranks
+    # any stale tug a generic root happens to carry.
+    exe_dir = os.path.dirname(sys.executable)
+    if exe_dir:
+        parts.append(exe_dir)
     parts.extend(EXTRA_EXEC_PATHS)
-    return os.pathsep.join([p for p in parts if p])
+    seen = set()
+    unique = []
+    for part in parts:
+        if not part or part in seen:
+            continue  # empty or already present: first occurrence wins
+        seen.add(part)
+        unique.append(part)
+    return os.pathsep.join(unique)
 
 
 def resolve_executable(argv, env=None):

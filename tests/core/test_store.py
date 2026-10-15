@@ -2,6 +2,8 @@
 
 import json
 import sqlite3
+import threading
+import time
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -753,4 +755,145 @@ def test_snapshot_shape(tmp_path):
     assert thread["status"] == "open"
     assert len(snap["replies"]) == 1
     assert snap["replies"][0]["body"] == "go ahead"
+    store.close()
+
+
+# -- thread safety: one lock over reads and writes --
+#
+# The store shares ONE sqlite connection across threads. Two cursors
+# stepping it at once (the console's ingest writer mid INSERT plus a
+# request thread's listing SELECT) interleave inside one statement,
+# and the sqlite3.Row objects come back shaped for the wrong
+# statement -- the IndexError("tuple index out of range") that hit
+# _identity_maps 5 times in a 20s local stress (1 ingest writer +
+# 6 readers) and flaked three console tests in CI. So reads serialize
+# on the same lock writes always used. The deterministic gate below
+# pins that; the stress canary after it is a tripwire, not the gate.
+
+
+def run_until_done(store_method, hold_lock):
+    """Call store_method on a thread while the test holds store._lock:
+    (blocked?, result dict). Deterministic in both directions: the
+    call cannot finish while the lock is held (it must block on the
+    acquire), and finishes promptly once it is released."""
+    done = threading.Event()
+    result = {}
+
+    def call():
+        try:
+            result["value"] = store_method()
+        except BaseException as exc:  # surfaced by the caller
+            result["error"] = repr(exc)
+        finally:
+            done.set()
+
+    with hold_lock:
+        thread = threading.Thread(target=call)
+        thread.start()
+        blocked = not done.wait(0.5)
+    finished = done.wait(5.0)
+    thread.join(timeout=5.0)
+    return blocked, finished, result
+
+
+def test_sessions_read_serializes_on_the_store_lock(tmp_path):
+    """DETERMINISTIC GATE (read direction): sessions() is a pure
+    read, and it still must block on store._lock. On the old code,
+    where reads skipped the lock, this fails exactly the way
+    production did: the call races straight through while the lock
+    is held."""
+    spool_root = tmp_path / "spool"
+    write(spool_root, now=WHEN)
+    store = open_store(tmp_path)
+    store.ingest_spool(str(spool_root))
+
+    blocked, finished, result = run_until_done(
+        store.sessions, hold_lock=store._lock
+    )
+    assert blocked, (
+        "sessions() completed while another thread held store._lock:"
+        " reads do not serialize on the store lock"
+    )
+    assert finished, "sessions() did not finish after the lock was released"
+    assert "error" not in result
+    assert [s["session_id"] for s in result["value"]] == ["s1"]
+    store.close()
+
+
+def test_add_reply_write_serializes_on_the_same_store_lock(tmp_path):
+    """DETERMINISTIC GATE (write direction): add_reply() blocks on
+    the very lock the read test holds, proving both directions
+    serialize on ONE lock, not one per kind."""
+    store = open_store(tmp_path)
+
+    blocked, finished, result = run_until_done(
+        lambda: store.add_reply("noted", session_id="s1"),
+        hold_lock=store._lock,
+    )
+    assert blocked, (
+        "add_reply() completed while another thread held store._lock:"
+        " writes do not serialize on the store lock"
+    )
+    assert finished, "add_reply() did not finish after the lock was released"
+    assert "error" not in result
+    assert result["value"]["session_id"] == "s1"
+    assert [r["body"] for r in store.replies()] == ["noted"]
+    store.close()
+
+
+def test_concurrent_ingest_and_reads_canary(tmp_path):
+    """CANARY, not the gate: ~4s of the console's live shape (one
+    ingest writer appending to a real spool and folding it in, four
+    readers hammering the listing endpoints on the same Store),
+    asserting zero exceptions anywhere. The shape produced the
+    _identity_maps IndexError before reads took the lock; the
+    deterministic tests above are what prove serialization, this one
+    catches a future helper that quietly goes around the lock."""
+    spool_root = tmp_path / "spool"
+    write(spool_root, now=WHEN, title="seed")  # writer progress is
+    # guaranteed from here even on a loaded machine
+    store = open_store(tmp_path)
+    store.ingest_spool(str(spool_root))
+
+    errors = []
+    stop = threading.Event()
+
+    def ingest_writer():
+        i = 0
+        while not stop.is_set():
+            try:
+                write(
+                    spool_root,
+                    now=WHEN + timedelta(seconds=i),
+                    session_id="s%d" % (i % 3),
+                    title="w%04d" % i,
+                )
+                store.ingest_spool(str(spool_root))
+                i += 1
+            except BaseException as exc:
+                errors.append("writer: %r" % exc)
+                return
+
+    def reader():
+        while not stop.is_set():
+            try:
+                store.sessions()
+                store.events(limit=20)
+                store.threads()
+                store.snapshot()
+            except BaseException as exc:
+                errors.append("reader: %r" % exc)
+                return
+
+    threads = [threading.Thread(target=ingest_writer)]
+    threads += [threading.Thread(target=reader) for _ in range(4)]
+    for thread in threads:
+        thread.start()
+    time.sleep(4.0)  # the bounded canary window
+    stop.set()
+    for thread in threads:
+        thread.join(timeout=10.0)
+
+    assert errors == []
+    assert len(store.sessions()) >= 1
     store.close()
