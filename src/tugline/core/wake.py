@@ -59,6 +59,7 @@ import os
 import shutil
 import sqlite3
 import subprocess
+import sys
 import time
 import urllib.request
 from datetime import datetime, timezone
@@ -131,14 +132,50 @@ def _now_iso() -> str:
 EXTRA_EXEC_PATHS = ["/opt/homebrew/bin", "/usr/local/bin"]
 
 
+def tug_bin_dirs():
+    """Directories holding a tug executable, for the child's PATH.
+
+    A woken session runs its hooks as "tug hook-claude <Event>" (or
+    "tug hook-zcode <Event>"); under the daemon's launchd PATH a bare
+    tug cannot resolve, so every hook in a wake-spawned session would
+    silently fail exactly as the dispatcher itself did before W13.
+    The installer embeds absolute hook commands, so this is defense
+    in depth. A directory only qualifies when a tug file is actually
+    in it: the interpreter's bin dir (a venv or tool install puts tug
+    next to its python) and ~/.local/bin (the documented install
+    location). A function, not a constant, because the answer depends
+    on where this process runs from; tests pin it with fixture dirs.
+    """
+    directories = []
+    seen = set()
+    candidates = [
+        os.path.dirname(os.path.abspath(sys.executable)),
+        os.path.join(os.path.expanduser("~"), ".local", "bin"),
+    ]
+    for directory in candidates:
+        if not directory or directory in seen:
+            continue
+        seen.add(directory)
+        if os.path.isfile(os.path.join(directory, "tug")):
+            directories.append(directory)
+    return directories
+
+
 def _augmented_path(env=None):
     """PATH from env (falling back to the process environment) plus
-    the extra roots, empty components dropped: the os.pathsep-joined
-    search string shutil.which consumes."""
+    the extra roots and the tug bin dirs, empty components dropped:
+    the os.pathsep-joined search string shutil.which consumes."""
     source = os.environ if env is None else env
     parts = [source.get("PATH") or ""]
     parts.extend(EXTRA_EXEC_PATHS)
-    return os.pathsep.join([p for p in parts if p])
+    parts.extend(tug_bin_dirs())
+    unique = []
+    seen = set()
+    for part in parts:
+        if part and part not in seen:
+            seen.add(part)
+            unique.append(part)
+    return os.pathsep.join(unique)
 
 
 def resolve_executable(argv, env=None):

@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import sys
 from datetime import datetime
 
@@ -64,6 +65,40 @@ def resolve_path(settings_path=None) -> str:
 
 def hook_command(event, command="tug") -> str:
     return "%s hook-claude %s # %s" % (command, event, MARKER)
+
+
+def absolute_command(command="tug", which=shutil.which) -> str:
+    """Resolve a bare command name to an absolute path for the hook
+    entries.
+
+    The daemon (launchd) and the sessions it wakes run on
+    PATH=/usr/bin:/bin:/usr/sbin:/sbin, where a bare "tug" cannot
+    resolve, so a hook written as a bare name silently fails in
+    exactly the sessions tugline exists to serve. Resolution tries
+    the installer's own PATH, then the directory of the running
+    interpreter (a venv install puts tug next to its python), then
+    ~/.local/bin (the documented install location). A name nothing
+    finds stays bare, degrading to the old behavior rather than
+    breaking the install; a name that already carries a path
+    separator is an explicit choice and passes through.
+    """
+    name = str(command)
+    if os.path.sep in name:
+        return name
+    found = which(name)
+    if not found:
+        sibling = os.path.join(
+            os.path.dirname(os.path.abspath(sys.executable)), name
+        )
+        if os.path.isfile(sibling) and os.access(sibling, os.X_OK):
+            found = sibling
+    if not found:
+        local = os.path.join(
+            os.path.expanduser("~"), ".local", "bin", name
+        )
+        if os.path.isfile(local) and os.access(local, os.X_OK):
+            found = local
+    return found or name
 
 
 def is_marked(hook) -> bool:
@@ -135,14 +170,53 @@ def write_settings(path, data) -> None:
     os.replace(tmp, path)
 
 
+def _upgrade_bare_commands(data) -> int:
+    """Rewrite bare tug executables in tugline's own hook entries to
+    absolute paths; returns how many entries changed.
+
+    Installs from before the absolute-command fix carry bare
+    "tug hook-claude <Event>" commands, which silently fail under the
+    daemon's launchd PATH. Entries whose executable already carries a
+    path (an explicit install command or a prior upgrade) pass through
+    untouched, as does anything the resolver cannot find.
+    """
+    count = 0
+    hooks = data.get("hooks")
+    if not isinstance(hooks, dict):
+        return 0
+    for groups in hooks.values():
+        if not isinstance(groups, list):
+            continue
+        for group in groups:
+            if not isinstance(group, dict):
+                continue
+            inner = group.get("hooks")
+            if not isinstance(inner, list):
+                continue
+            for hook in inner:
+                if not (isinstance(hook, dict) and is_marked(hook)):
+                    continue
+                command = str(hook.get("command") or "")
+                parts = command.split(None, 1)
+                if len(parts) < 2 or os.path.sep in parts[0]:
+                    continue
+                resolved = absolute_command(parts[0])
+                if resolved == parts[0]:
+                    continue
+                hook["command"] = "%s %s" % (resolved, parts[1])
+                count += 1
+    return count
+
+
 def install(settings_path=None, command="tug", now=None, warn_stream=None) -> dict:
     """Append tugline hook entries to the Claude Code settings.
 
     Idempotent per event (append-only installer discipline): events
     that already carry a tugline entry are left alone, missing ones
-    are appended, and nothing is written when every event is already
-    wired. Warns once that already-running sessions keep their old
-    hooks.
+    are appended, and bare tug commands in existing entries are
+    upgraded in place to the absolute tug path. Nothing is written
+    when every event is already wired and no bare command remains.
+    Warns once that already-running sessions keep their old hooks.
     """
     path = resolve_path(settings_path)
     existed = os.path.exists(path)
@@ -159,8 +233,9 @@ def install(settings_path=None, command="tug", now=None, warn_stream=None) -> di
         raise SettingsError('settings "hooks" must be an object: %s' % (path,))
 
     already = marked_events(data)
+    upgraded = _upgrade_bare_commands(data)
     needed = [event for event in HOOK_EVENTS if event not in already]
-    if not needed:
+    if not needed and not upgraded:
         return {
             "status": "already-installed",
             "changed": False,
@@ -169,6 +244,7 @@ def install(settings_path=None, command="tug", now=None, warn_stream=None) -> di
             "events": sorted(already),
         }
 
+    embed = absolute_command(command)
     for event in needed:
         timeout = HOOK_EVENTS[event]
         groups = hooks.get(event)
@@ -184,7 +260,7 @@ def install(settings_path=None, command="tug", now=None, warn_stream=None) -> di
                 "hooks": [
                     {
                         "type": "command",
-                        "command": hook_command(event, command),
+                        "command": hook_command(event, embed),
                         "timeout": timeout,
                     }
                 ]
@@ -199,6 +275,7 @@ def install(settings_path=None, command="tug", now=None, warn_stream=None) -> di
         "changed": True,
         "path": path,
         "backup": backup,
+        "upgraded": upgraded,
         "events": sorted(set(already) | set(needed)),
     }
 
