@@ -212,3 +212,46 @@ def test_answer_unknown_thread(home, capsys):
     seed_session(home)
     assert main(["answer", "--thread", "ghost", "A"]) == 2
     assert "unknown thread" in capsys.readouterr().err.lower()
+
+
+# -- name targeting on the ask path (W10-L23) --
+
+
+def test_cli_ask_by_unique_label_gets_past_resolution(home, fake_ntfy,
+                                                      capsys):
+    """A label the console can target must work for tug ask too: the
+    ask proceeds (and times out cleanly) instead of exiting 2 with
+    unknown session."""
+    seed_session(home)
+    with store(home) as opened:
+        opened.set_session_label("sess_517ee9c0aaaa", "night build")
+    write_config(home, fake_ntfy.url)
+    code = main(
+        ["ask", "--session", "night build",
+         "--option", "A: ship", "--option", "B: roll back",
+         "--timeout", "1", "which deploy?"]
+    )
+    out = capsys.readouterr()
+    assert code == 1
+    assert out.out.strip() == "no answer"  # it asked; it did not fail
+    threads = store(home).threads()
+    assert len(threads) == 1
+    assert threads[0]["session_id"] == "sess_517ee9c0aaaa"
+
+
+def test_cli_ask_by_ambiguous_name_lists_candidates(home, capsys):
+    seed_session(home, session_id="sess_one")
+    seed_session(home, session_id="sess_two")
+    with store(home) as opened:
+        opened.add_session_tag("sess_one", "build")
+        opened.add_session_tag("sess_two", "build")
+    code = main(
+        ["ask", "--session", "build",
+         "--option", "A: x", "--option", "B: y", "q?"]
+    )
+    out = capsys.readouterr()
+    assert code == 2
+    assert "ambiguous tag: 2 sessions match" in out.err
+    assert "sess_one" in out.err
+    assert "sess_two" in out.err
+    assert store(home).threads() == []

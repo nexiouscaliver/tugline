@@ -556,6 +556,20 @@ def cmd_ask(args) -> int:
             file=sys.stderr,
         )
         return 2
+    if result.get("reason") == "ambiguous session":
+        # same semantics as the console's ambiguous-name 400: the
+        # candidate sessions are listed so the caller can pick one
+        print(
+            "ambiguous %s: %d sessions match; pass an exact session id"
+            " (or a unique label): %s"
+            % (
+                result.get("kind") or "name",
+                len(result.get("candidates") or []),
+                " ".join(result.get("candidates") or []),
+            ),
+            file=sys.stderr,
+        )
+        return 2
     if result.get("reason") == "timeout":
         print("no answer")
         return 1

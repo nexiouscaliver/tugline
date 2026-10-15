@@ -202,13 +202,43 @@ class AskRunner:
 
     # -- the lifecycle --
 
+    def _resolve_session(self, ref):
+        """(session row or None, failure dict or None) for one --session
+        reference.
+
+        The ask path accepts what the console's reply targeting
+        accepts (W7-L18): an exact session id, then a label exactly
+        one session carries, then a tag exactly one session carries.
+        An ambiguous name fails with the candidates listed, mirroring
+        the console's 400; nothing matched fails as unknown session.
+        """
+        try:
+            resolved = self.store.resolve_session_ref(ref)
+        except Exception:
+            resolved = None
+        if resolved and resolved.get("match"):
+            row = self.store.session(resolved["session_id"])
+            if row is not None:
+                return row, None
+        if resolved and resolved.get("ambiguous"):
+            return None, {
+                "ok": False,
+                "reason": "ambiguous session",
+                "kind": resolved.get("kind") or "",
+                "candidates": list(resolved.get("candidates") or []),
+            }
+        return None, {"ok": False, "reason": "unknown session"}
+
     def _run(self, session_id, question, options, timeout_s, nonce):
         session_id = str(session_id or "")
         timeout_s = min(max(float(timeout_s or 0), 0.0), MAX_TIMEOUT_S)
-        row = self.store.session(session_id)
+        row, failure = self._resolve_session(session_id)
         if row is None:
-            return {"ok": False, "reason": "unknown session",
-                    "nonce": str(nonce or "")}
+            failure["nonce"] = str(nonce or "")
+            return failure
+        # everything downstream (thread creation, binding checks, the
+        # notification body) carries the true id, never the reference
+        session_id = str(row.get("session_id") or session_id)
         thread = self.store.create_ask_thread(
             session_id, question, options, nonce=nonce
         )

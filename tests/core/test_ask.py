@@ -576,3 +576,116 @@ def test_ask_thread_survives_approval_reconciliation(tmp_path):
         "ask thread expired by approval reconciliation: %r (counts %r)"
         % (row["status"], counts)
     )
+
+
+# -- name resolution on the ask path (W10-L23) --
+#
+# tug ask used to accept only the exact bare session id: a label or a
+# tag (both valid reply targets on the console, which resolves id >
+# unique label > unique tag) failed with "unknown session". The ask
+# path now runs the same resolution; ambiguous names fail with the
+# candidates listed, exactly like the console's 400.
+
+
+def test_ask_by_unique_label_resolves(tmp_path):
+    seed(tmp_path)
+    runner = make_runner(tmp_path)
+    store, clock = runner._test_store, runner._test_clock
+    store.set_session_label("sess_517ee9c0aaaa", "night build")
+    journal = str(tmp_path / "replies.jsonl")
+
+    def reply_later(seconds):
+        journal_append(
+            journal,
+            {"id": "ntfy-l", "body": "A", "consumed": False,
+             "session_id": "sess_517ee9c0aaaa"},
+        )
+
+    clock.on_sleep = reply_later
+    result = runner.run(
+        "night build", "q?", OPTIONS, timeout_s=300, nonce="ask-1"
+    )
+    assert result["ok"] is True
+    assert result["key"] == "A"
+    runner._test_store.close()
+
+
+def test_ask_by_unique_tag_resolves(tmp_path):
+    seed(tmp_path)
+    runner = make_runner(tmp_path)
+    store, clock = runner._test_store, runner._test_clock
+    store.add_session_tag("sess_517ee9c0aaaa", "deploy")
+    journal = str(tmp_path / "replies.jsonl")
+
+    def reply_later(seconds):
+        journal_append(
+            journal,
+            {"id": "ntfy-t", "body": "B", "consumed": False,
+             "session_id": "sess_517ee9c0aaaa"},
+        )
+
+    clock.on_sleep = reply_later
+    result = runner.run(
+        "deploy", "q?", OPTIONS, timeout_s=300, nonce="ask-2"
+    )
+    assert result["ok"] is True
+    assert result["key"] == "B"
+    runner._test_store.close()
+
+
+def test_ask_by_ambiguous_tag_fails_with_candidates(tmp_path):
+    seed(tmp_path, session_id="sess_one")
+    seed(tmp_path, session_id="sess_two")
+    runner = make_runner(tmp_path)
+    store = runner._test_store
+    store.add_session_tag("sess_one", "build")
+    store.add_session_tag("sess_two", "build")
+
+    result = runner.run(
+        "build", "q?", OPTIONS, timeout_s=5, nonce="ask-3"
+    )
+
+    assert result["ok"] is False
+    assert result["reason"] == "ambiguous session"
+    assert result["kind"] == "tag"
+    assert sorted(result["candidates"]) == ["sess_one", "sess_two"]
+    assert store.threads() == []  # nothing was created for the name
+    store.close()
+
+
+def test_ask_by_ambiguous_label_fails_with_candidates(tmp_path):
+    seed(tmp_path, session_id="sess_one")
+    seed(tmp_path, session_id="sess_two")
+    runner = make_runner(tmp_path)
+    store = runner._test_store
+    store.set_session_label("sess_one", "twin")
+    store.set_session_label("sess_two", "twin")
+
+    result = runner.run("twin", "q?", OPTIONS, timeout_s=5, nonce="ask-4")
+
+    assert result["ok"] is False
+    assert result["reason"] == "ambiguous session"
+    assert result["kind"] == "label"
+    assert sorted(result["candidates"]) == ["sess_one", "sess_two"]
+    store.close()
+
+
+def test_ask_by_exact_id_still_resolves(tmp_path):
+    seed(tmp_path)
+    runner = make_runner(tmp_path)
+    clock = runner._test_clock
+    journal = str(tmp_path / "replies.jsonl")
+
+    def reply_later(seconds):
+        journal_append(
+            journal,
+            {"id": "ntfy-i", "body": "A", "consumed": False,
+             "session_id": "sess_517ee9c0aaaa"},
+        )
+
+    clock.on_sleep = reply_later
+    result = runner.run(
+        "sess_517ee9c0aaaa", "q?", OPTIONS, timeout_s=300, nonce="ask-5"
+    )
+    assert result["ok"] is True
+    runner._test_store.close()
