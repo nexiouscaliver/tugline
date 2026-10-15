@@ -218,6 +218,14 @@ h3 { margin-top: 0.9rem; }
 
 button { font: inherit; }
 
+/* phones double-tap zoom can eat a fast second tap on an option or
+   decision button; manipulation kills the zoom delay without
+   breaking anything desktop */
+button,
+.tab {
+  touch-action: manipulation;
+}
+
 :focus-visible {
   outline: 1px solid var(--accent);
   outline-offset: 1px;
@@ -896,7 +904,10 @@ tr.selected .idlink { color: var(--accent); }
 }
 
 /* approvals above the ask cards, with a breath between the lists */
-#asks-open:not(:empty) + #asks-mcq { margin-top: 0.5rem; }
+#asks-open:not(:empty) + #asks-mcq,
+#asks-mcq:not(:empty) + #asks-perm {
+  margin-top: 0.5rem;
+}
 
 .asks > li {
   border: 1px solid var(--border);
@@ -1035,6 +1046,69 @@ tr.selected .idlink { color: var(--accent); }
 
 /* the reply link on an ask card keeps the 44px target everywhere */
 .askcard .ask-replylink {
+  margin-top: 0.45rem;
+  min-height: 44px;
+  display: inline-flex;
+  align-items: center;
+}
+
+/* permission cards (W10-L24): the harness permission ask with no
+   decision buttons. Same card language as the ask cards: identity
+   line with badges and a waiting chip, the tool as a mono chip, the
+   question in full, the decidability note, and a 44px reply link */
+.permcard {
+  border: 1px solid var(--border);
+  border-radius: 2px;
+  padding: 0.55rem 0.65rem;
+}
+
+.permcard.selected { border-color: var(--accent); }
+
+.perm-top {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.3rem 0.5rem;
+}
+
+.perm-top .sid {
+  font-family: var(--mono);
+  font-size: 0.9rem;
+  overflow-wrap: anywhere;
+}
+
+.perm-top .sbadge {
+  align-self: center;
+}
+
+.perm-top .age {
+  margin-left: auto;
+  font-family: var(--mono);
+  color: var(--muted);
+}
+
+.perm-tool {
+  margin: 0.45rem 0 0;
+  font-family: var(--mono);
+  font-size: 0.85rem;
+  color: var(--amber);
+  overflow-wrap: anywhere;
+}
+
+.perm-q {
+  margin: 0.3rem 0 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.perm-note {
+  margin: 0.45rem 0 0;
+  font-size: 0.85rem;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.perm-replylink {
   margin-top: 0.45rem;
   min-height: 44px;
   display: inline-flex;
@@ -1288,10 +1362,16 @@ textarea:disabled { opacity: 0.45; }
   .settled .tx { white-space: normal; overflow: visible; }
 
   /* ask cards: option rows are full-width 48px targets with wrapped
-     option text; the reply link spans the card width */
+     option text; the reply link spans the card width. Permission
+     cards follow the same rules: the reply link is a full-width 44px
+     target with readable text */
   .askcard .ask-top .age { min-width: 0; }
   .askcard .ask-opt { font-size: 1rem; }
   .askcard .ask-replylink { display: flex; width: 100%; font-size: 0.95rem; }
+  .permcard .perm-top .age { min-width: 0; }
+  .permcard .perm-q,
+  .permcard .perm-note { font-size: 0.95rem; }
+  .permcard .perm-replylink { display: flex; width: 100%; font-size: 0.95rem; }
 
   /* grouped stream sections: the header wraps name, chip, and age,
      and keeps its 44px target */

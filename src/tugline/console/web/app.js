@@ -58,6 +58,28 @@
  * the request is in flight, an inline error re-enables them, and the
  * settled list shows the chosen letter in green.
  *
+ * Permission cards (W10-L24): kind=permission threads render under
+ * the ask cards. They exist because the store threads every
+ * permissionrequest regardless of the approve toggle, so a harness
+ * permission ask (a zcode workflow confirmation, a tool prompt) is
+ * visible even while the decision-button flow is off. The card shows
+ * the question, the tool, the session identity, and a live status
+ * (waiting while open, gone once the harness moved on); it carries no
+ * decision buttons, because no decision file exists to write. When
+ * the server says the thread is not decidable the card shows the
+ * plain note ("approve is off - answer in the harness"). The one
+ * honest console action is the reply link, through the thread
+ * binding like every other ask.
+ *
+ * Section truth (W10-L24): the asks panel renders from thread rows
+ * that carry their own identity (display_id, label, tags, adapter,
+ * project) and decidability, both from GET /api/threads and from the
+ * SSE snapshot (the same server-side view), never from an ad-hoc
+ * fetch or the sessions panel's in-memory map. The stream's onopen
+ * refetches the section, so a reconnect repaints instead of leaving
+ * a stale list, and a failed fetch shows an inline error line rather
+ * than a silently stale or blank panel.
+ *
  * Identity everywhere (W9-L22): every stream row and detail event row
  * renders the display name the enriched row itself carries
  * (display_id: the label when set, else the collision-proof suffix),
@@ -182,6 +204,19 @@ function rowName(event) {
 function targetName(sessionId) {
   const label = labels.get(sessionId);
   return label ? label + " (" + sid(sessionId) + ")" : sid(sessionId);
+}
+
+// The name a thread row renders (W10-L24): the identity fields the
+// decorated thread row itself carries, label first, else the
+// collision-proof display id. The sessions map is only the fallback
+// for a row the server could not decorate; the section never
+// stitches its own names.
+function threadName(thread) {
+  const label = String((thread && thread.label) || "");
+  if (label) return label;
+  return String(
+    (thread && thread.display_id) || sid(thread && thread.session_id)
+  );
 }
 
 function parseTs(iso) {
@@ -1132,12 +1167,21 @@ function paintStream() {
 
 // -- asks panel --
 
+// The tool a permission body names, as a display chip: "permission:
+// <tool>" from the hook bodies. Display sugar only; the full body
+// always renders too, so nothing is hidden when the pattern misses.
+function permissionTool(thread) {
+  const body = String(thread.body || thread.title || "");
+  const match = body.match(/permission:\s*(.+)$/);
+  return match ? match[1].trim() : "";
+}
+
 function openAskRow(thread) {
   const item = document.createElement("li");
   if (isSelected("thread", thread.nonce)) item.classList.add("selected");
 
   const line = el("div", "ask-line");
-  line.append(el("span", "sid", sid(thread.session_id)));
+  line.append(el("span", "sid", threadName(thread)));
   line.append(el("span", "tx", String(thread.body || thread.title || "")));
 
   const createdMs = parseTs(thread.created_ts);
@@ -1156,13 +1200,16 @@ function openAskRow(thread) {
   const error = el("p", "error");
   error.hidden = true;
 
-  approve.addEventListener("click", () =>
-    decide(thread.nonce, "allow", [approve, deny], error)
-  );
-  deny.addEventListener("click", () =>
-    decide(thread.nonce, "deny", [approve, deny], error)
-  );
-  reply.addEventListener("click", () => {
+  approve.addEventListener("click", (event) => {
+    event.stopPropagation(); // a button press is never a card tap
+    decide(thread.nonce, "allow", [approve, deny], error);
+  });
+  deny.addEventListener("click", (event) => {
+    event.stopPropagation();
+    decide(thread.nonce, "deny", [approve, deny], error);
+  });
+  reply.addEventListener("click", (event) => {
+    event.stopPropagation();
     if (isMobile()) {
       // same flow as picking a session card: set the thread target
       // and land on the reply box, ready to write
@@ -1182,6 +1229,16 @@ function openAskRow(thread) {
 
 function settledAskRow(thread) {
   const item = document.createElement("li");
+  if (thread.kind === "permission") {
+    // a permission thread settles only by moving on: gone (the
+    // harness answered its own prompt or cancelled). The row keeps
+    // the last known question and its timestamp.
+    const outcome = thread.status === "gone" ? "gone" : String(thread.status);
+    item.append(el("span", "out out-gray", outcome));
+    item.append(el("span", "sid", threadName(thread)));
+    item.append(el("span", "tx", String(thread.body || thread.title || "")));
+    return item;
+  }
   if (thread.kind === "ask") {
     // an answered ask shows its chosen letter in green; an expired
     // one reads expired like every other settled row
@@ -1190,7 +1247,7 @@ function settledAskRow(thread) {
     item.append(
       el("span", "out out-" + (expired ? "gray" : "green"), outcome)
     );
-    item.append(el("span", "sid", sid(thread.session_id)));
+    item.append(el("span", "sid", threadName(thread)));
     item.append(el("span", "tx", String(thread.title || thread.body || "")));
     return item;
   }
@@ -1198,7 +1255,7 @@ function settledAskRow(thread) {
   const outcome = expired ? "expired" : String(thread.answer || "unknown");
   const tone = expired ? "gray" : outcome === "allow" ? "green" : "red";
   item.append(el("span", "out out-" + tone, outcome));
-  item.append(el("span", "sid", sid(thread.session_id)));
+  item.append(el("span", "sid", threadName(thread)));
   item.append(el("span", "tx", String(thread.body || thread.title || "")));
   return item;
 }
@@ -1215,7 +1272,7 @@ function openAskCard(thread) {
   if (isSelected("thread", thread.nonce)) item.classList.add("selected");
 
   const top = el("div", "ask-top");
-  const name = el("span", "sid", sid(thread.session_id));
+  const name = el("span", "sid", threadName(thread));
   name.title = String(thread.session_id || "");
   top.append(name);
   const createdMs = parseTs(thread.created_ts);
@@ -1239,9 +1296,10 @@ function openAskCard(thread) {
       el("span", "opt-key", key),
       el("span", "opt-text", String(option.text || ""))
     );
-    row.addEventListener("click", () =>
-      answerAsk(thread, key, buttons, error)
-    );
+    row.addEventListener("click", (event) => {
+      event.stopPropagation(); // an option tap is never a card tap
+      answerAsk(thread, key, buttons, error);
+    });
     buttons.push(row);
     opts.append(row);
   }
@@ -1252,7 +1310,8 @@ function openAskCard(thread) {
   const reply = el("button", "linkish ask-replylink", "reply");
   reply.type = "button";
   if (isSelected("thread", thread.nonce)) reply.classList.add("on");
-  reply.addEventListener("click", () => {
+  reply.addEventListener("click", (event) => {
+    event.stopPropagation();
     if (isMobile()) {
       state.selected = { kind: "thread", id: thread.nonce };
       paintAsks();
@@ -1266,19 +1325,98 @@ function openAskCard(thread) {
   return item;
 }
 
+// One open kind=permission thread as a waiting card: the question in
+// full, the tool as a chip, the session identity, and the honest
+// decidability note. No decision buttons: no decision file exists for
+// this thread, so buttons would lie. The reply link stays, through
+// the thread binding like every other ask (W10-L24).
+function openPermissionCard(thread) {
+  const item = document.createElement("li");
+  item.className = "permcard";
+  if (isSelected("thread", thread.nonce)) item.classList.add("selected");
+
+  const top = el("div", "perm-top");
+  const name = el("span", "sid", threadName(thread));
+  name.title = String(thread.session_id || "");
+  top.append(name);
+  if (thread.adapter) {
+    top.append(el("span", "sbadge", String(thread.adapter)));
+  }
+  if (thread.project) {
+    top.append(el("span", "sbadge", String(thread.project)));
+  }
+  top.append(
+    el("span", "chip chip-amber chip-state", "waiting")
+  );
+  const createdMs = parseTs(thread.created_ts);
+  const age = el("span", "age", relTime(createdMs));
+  age.dataset.rel = createdMs === null ? "" : String(createdMs);
+  age.title = String(thread.created_ts || "");
+  top.append(age);
+  item.append(top);
+
+  const tool = permissionTool(thread);
+  if (tool) {
+    item.append(el("p", "perm-tool", tool));
+  }
+  item.append(
+    el("p", "perm-q", String(thread.body || thread.title || ""))
+  );
+
+  const note = el("p", "perm-note");
+  note.append(
+    el(
+      "span",
+      null,
+      String(thread.decidable_note || "answer in the harness")
+    )
+  );
+  item.append(note);
+
+  const reply = el("button", "linkish perm-replylink", "reply");
+  reply.type = "button";
+  if (isSelected("thread", thread.nonce)) reply.classList.add("on");
+  reply.addEventListener("click", (event) => {
+    event.stopPropagation();
+    if (isMobile()) {
+      state.selected = { kind: "thread", id: thread.nonce };
+      paintAsks();
+      paintTarget();
+      showTab("reply");
+      return;
+    }
+    toggleThread(thread.nonce);
+  });
+  item.append(reply);
+  return item;
+}
+
 function paintAsks() {
+  // the three open partitions, approvals on top, then ask cards,
+  // then permission cards; settled rows (answered, expired, gone)
+  // share the list below
   const openApprovals = state.threads.filter(
-    (thread) => thread.status === "open" && thread.kind !== "ask"
+    (thread) =>
+      thread.status === "open" &&
+      thread.kind !== "ask" &&
+      thread.kind !== "permission"
   );
   const openAsks = state.threads.filter(
     (thread) => thread.status === "open" && thread.kind === "ask"
   );
+  const openPermissions = state.threads.filter(
+    (thread) => thread.status === "open" && thread.kind === "permission"
+  );
   const settled = state.threads.filter((thread) => thread.status !== "open");
 
-  // approvals keep their cards above the ask cards
   $("asks-open").replaceChildren(...openApprovals.map(openAskRow));
   $("asks-mcq").replaceChildren(...openAsks.map(openAskCard));
-  $("asks-empty").hidden = openApprovals.length + openAsks.length > 0;
+  $("asks-perm").replaceChildren(
+    ...openPermissions.map(openPermissionCard)
+  );
+  const openCount =
+    openApprovals.length + openAsks.length + openPermissions.length;
+  $("asks-empty").hidden = openCount > 0;
 
   $("asks-settled").replaceChildren(...settled.map(settledAskRow));
   $("asks-settled-heading").hidden = settled.length === 0;
@@ -1287,7 +1425,7 @@ function paintAsks() {
   if (
     state.selected !== null &&
     state.selected.kind === "thread" &&
-    ![...openApprovals, ...openAsks].some(
+    ![...openApprovals, ...openAsks, ...openPermissions].some(
       (thread) => thread.nonce === state.selected.id
     )
   ) {
@@ -1482,20 +1620,33 @@ async function refreshThreads() {
   try {
     const data = await api("/api/threads");
     state.threads = data.threads || [];
+    const errorNode = $("asks-error");
+    if (errorNode) errorNode.hidden = true; // a good read clears it
     paintAsks();
   } catch (err) {
-    // keep the last painted list
+    // keep the last painted list, but say so: a stale section must
+    // never read as current, and a dead server must not look blank
+    const errorNode = $("asks-error");
+    if (errorNode) {
+      errorNode.textContent = "asks refresh failed: " + err.message;
+      errorNode.hidden = false;
+    }
   }
 }
 
 function applyState(payload) {
   state.sessions = payload.sessions || [];
   state.events = payload.events || [];
+  // snapshot threads carry the same decoration as GET /api/threads
+  // (one server-side view), so this paint and a section refetch can
+  // never disagree about identity or decidability
   state.threads = payload.threads || [];
   state.replies = payload.replies || [];
   state.health = payload.health || state.health;
   state.spoolDepth = payload.spool_depth || 0;
   state.lastIngestMs = parseTs(payload.last_ingest_ts);
+  const asksError = $("asks-error");
+  if (asksError) asksError.hidden = true; // a snapshot landed: current
   paintHeader();
   paintSessions();
   paintStream();
@@ -1528,15 +1679,26 @@ function onDelta(delta) {
   refreshEvents(); // always: repaint the stream from a cheap refetch
   if (counts.sessions) refreshSessions();
   if (state.detailId !== null) refreshDetail(); // the open detail page rides along
-  if (counts.threads || counts.answered || counts.open || counts.expired) {
-    refreshThreads();
+  if (
+    counts.threads ||
+    counts.answered ||
+    counts.open ||
+    counts.expired ||
+    counts.gone
+  ) {
+    refreshThreads(); // gone: a permission ask retired, no new row
   }
 }
 
 function connectStream() {
   if (stream !== null) stream.close();
   stream = new EventSource(withToken("/api/events/stream"));
-  stream.onopen = paintLiveChip;
+  stream.onopen = () => {
+    paintLiveChip();
+    // a (re)connected stream repaints the asks section from the
+    // source of truth, so a drop can never leave it stale (W10-L24)
+    refreshThreads();
+  };
   stream.onerror = () => {
     paintLiveChip();
     if (stream.readyState === 2) {
