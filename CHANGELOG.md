@@ -272,6 +272,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Woken sessions can run their tugline hooks again: the spawn PATH
+  now also carries the directory of the running tug executable (the
+  uv tool venv bin dir, which neither the launchd daemon PATH nor
+  the extra exec roots include), so the hooks' bare
+  `tug hook-zcode <Event>` command resolves to the same binary the
+  daemon runs instead of failing (core.hooks hook.run.failed) and
+  leaving the woken turn store-silent: no session events, no
+  response preview, no stop buzz. PATH entries are deduplicated,
+  first occurrence wins.
 - Daemon-context zcode wakes no longer die on the missing provider
   config: the zcode app injects ZCODE_BUILTIN_PROVIDER_CONFIG_FILE
   (and the personal variant) into its child processes, but the
